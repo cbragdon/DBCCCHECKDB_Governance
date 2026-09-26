@@ -50,6 +50,19 @@ The scripts in this folder build **on top of** Hallengren's
   model.
 - MI supports SQL Agent jobs natively, so `Deploy_SQLAgentJobs.sql` works
   unchanged.
+- **Next-gen General Purpose cannot be distinguished from classic General
+  Purpose via T-SQL** — confirmed against Microsoft's own documentation, this
+  is an ARM/control-plane-only distinction (`properties.isGeneralPurposeV2`
+  on the `Microsoft.Sql/managedInstances` resource). A Next-gen GP instance
+  still reports `sku = 'GeneralPurpose'` to every DMV this project queries,
+  and can even report the same `hardware_generation` as classic GP. Both
+  variants are therefore treated identically as `'GeneralPurpose'` by
+  `Precheck_RequiredSpaceForSetup.sql` and `Check_DiskAndTempdbHeadroom.sql`
+  — their GP-tier recommendation text says to verify Next-gen eligibility in
+  the Azure portal, since T-SQL alone can't answer it. `Get-MIServiceTierDetail.ps1`
+  (PowerShell, in this same folder) automates that verification via Azure
+  Resource Graph instead of a manual per-instance portal check — see its
+  header comment and `File-Reference.md` for usage.
 
 ## `@MaxDop` build-level compatibility
 
