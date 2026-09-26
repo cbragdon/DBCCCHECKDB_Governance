@@ -1,0 +1,3 @@
+ServerName,MaintenanceDB
+sql-vm01.contoso.com,DBAdmin
+my-instance.<region>.database.windows.net,DBAdmin

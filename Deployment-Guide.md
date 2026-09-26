@@ -285,6 +285,31 @@ significantly. `Run_LargeTier_WeeklyFullCheck` also skips execution entirely
 on non-primary replicas (full logical checks require primary-equivalent
 access), so it's safe to deploy identically to every replica.
 
+**Deploying Steps 1–5 to many instances at once:** for more than a handful
+of VMs/MIs, `Install-DBCCGovernanceToolkit.ps1` automates Step 2 (Step 1 —
+Ola Hallengren's toolkit — is still a manual prerequisite it checks for but
+does not install) across a whole list of targets in one run:
+
+```powershell
+# A couple of targets directly - auth is auto-detected per target
+# (Azure AD for *.database.windows.net, Windows Integrated Auth otherwise -
+# same pattern used throughout this project's own testing; never SQL auth):
+.\Install-DBCCGovernanceToolkit.ps1 -ServerName 'sql-vm01.contoso.com','my-mi.abc123.database.windows.net'
+
+# Larger fleets via CSV (see Targets.example.csv):
+.\Install-DBCCGovernanceToolkit.ps1 -CsvPath .\Targets.csv -MaintenanceDB 'DBAdmin'
+```
+
+It checks the `DatabaseIntegrityCheck` prerequisite per target first (skips
+with a clear error if Hallengren's toolkit isn't installed there yet),
+deploys the six procedures in dependency order, and — critically — one
+target's failure never stops the run; it's logged and the script moves on
+to the next target. It deliberately does **not** deploy
+`Deploy_SQLAgentJobs.sql` (Step 5 below) — that step needs a per-instance
+`@VLDBDatabaseList` review and is left as an explicit, reviewed action per
+target. Supports `-WhatIf` for a dry run and returns result objects (pipe to
+`Export-Csv` for a deployment record).
+
 ## Step 7: Monitoring / ongoing operations
 
 - Use `Monitor_CommandLog_Status.sql` regularly (or adapt its logic into
