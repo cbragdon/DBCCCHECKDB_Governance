@@ -316,6 +316,25 @@ access), so it's safe to deploy identically to every replica.
   your existing alerting integration) on all three jobs — not included here
   since it depends on your existing alerting stack.
 
+## Regression testing after any threshold/logic edit
+
+`Tests_CoreLogic.sql` is a framework-free (no tSQLt dependency) test suite
+covering the pure decision logic most likely to break silently when edited:
+the Small/Medium/Large/VLDB size-tier boundaries, the `IsShortfallMaterial`
+threshold math, and the job-schedule-overlap day-mask/interval math. It
+touches no system DMVs and doesn't require any other procedure to be
+deployed — safe to run against any database on either platform:
+
+```
+sqlcmd -S <server> -d <database> -E -C -i Tests_CoreLogic.sql -f 65001   -- box product
+sqlcmd -S <server> -d <database> -G -C -i Tests_CoreLogic.sql -f 65001   -- Managed Instance
+```
+
+It prints one PASS/FAIL row per test plus a summary, and raises an error
+(severity 16) if anything failed. Run it after changing any tier size
+boundary (Step 3), any `@MinMaterialShortfallGB`/`@MinMaterialShortfallPct`
+value, or the overlap-detection math in `Check_JobScheduleOverlap.sql`.
+
 ## Uninstall / rollback
 
 ```sql

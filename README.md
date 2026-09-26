@@ -88,6 +88,10 @@ EXEC dbo.Run_TieredIntegrityCheck;
 --    overlapping runs (violates the sequential-execution sizing assumption):
 :r Check_JobScheduleOverlap.sql
 EXEC dbo.Check_JobScheduleOverlap;
+
+-- 7. (Optional, recommended after any threshold/logic edit) Run the
+--    regression test suite - no dependencies, safe on any database:
+:r Tests_CoreLogic.sql
 ```
 
 See `Deployment-Guide.md` for full details, and `Tiering-Strategy.md` /
