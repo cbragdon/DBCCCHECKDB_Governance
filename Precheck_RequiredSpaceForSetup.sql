@@ -139,6 +139,24 @@
    service tier, not manually resizable) - these four columns are NULL for
    MI rows.
 
+ Data-file growth-safety check (box product, result set 1) - closing the
+ same gap for volume headroom that tempdb got in result set 2:
+   "ADD SPACE" for a database's data volume means adding physical disk
+   capacity - unlike tempdb, there's no "autogrowth will cover it"
+   possibility for the volume itself. But a related question still matters:
+   once you add that disk space, can the database's OWN data file(s)
+   actually use it? The script reports DataFileAutogrowthEnabled (0 if any
+   data file has autogrowth disabled) and DataFileMaxSizeCapGB (the lowest
+   configured max size among files that have one, NULL if unlimited) for
+   the affected database. When the volume shortfall is material, the
+   Recommendation appends explicit notes if autogrowth is disabled on a
+   data file, or if a max-size cap leaves less headroom than the shortfall
+   itself - either of which would mean adding disk space to the volume
+   alone doesn't fully solve the problem; the file-level setting also needs
+   adjusting. Not applicable on Managed Instance (storage there is a shared
+   instance-wide quota, not governed by per-file settings) - both columns
+   are NULL for MI rows.
+
  Usage:
    EXEC dbo.Precheck_RequiredSpaceForSetup;                          -- all user databases
    EXEC dbo.Precheck_RequiredSpaceForSetup @Databases = 'DB1,DB2';   -- specific databases only
@@ -256,6 +274,21 @@ BEGIN
             JOIN sys.master_files mf ON mf.database_id = d.database_id AND mf.type = 0   -- data files only
             CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
             WHERE d.name IN (SELECT DatabaseName FROM #Databases)
+        ),
+        -- Growth-safety: even after disk space is added to the volume, can
+        -- THIS database's own data file(s) actually use it? Worst case
+        -- (any file with an issue) is reported, matching the same
+        -- worst-case pattern used for tempdb in result set 2.
+        DbGrowth AS (
+            SELECT
+                d.name AS DatabaseName,
+                MIN(CASE WHEN mf.growth = 0 THEN 0 ELSE 1 END) AS DataFileAutogrowthEnabled,
+                MIN(CASE WHEN mf.max_size = -1 THEN NULL ELSE CAST(mf.max_size * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) END) AS DataFileMaxSizeCapGB,
+                MIN(CASE WHEN mf.max_size = -1 THEN NULL ELSE CAST((mf.max_size - mf.size) * 8.0 / 1024 / 1024 AS DECIMAL(18,2)) END) AS DataFileRemainingToCapGB
+            FROM sys.databases d
+            JOIN sys.master_files mf ON mf.database_id = d.database_id AND mf.type = 0   -- data files only
+            WHERE d.name IN (SELECT DatabaseName FROM #Databases)
+            GROUP BY d.name
         )
         SELECT
             db.DatabaseName,
@@ -273,11 +306,20 @@ BEGIN
             ProjectedFreePct_AfterFullCheckdb = CAST((v.VolumeFreeGB - db.EstSnapshotHeadroomGB_FullCheckdb) * 100.0 / NULLIF(v.VolumeTotalGB, 0) AS DECIMAL(5,2)),
             ShortfallGB          = shortfall.ShortfallGB,
             IsShortfallMaterial  = mat.IsShortfallMaterial,
+            DataFileAutogrowthEnabled = growth.DataFileAutogrowthEnabled,   -- 0 = at least one data file has growth disabled
+            DataFileMaxSizeCapGB      = growth.DataFileMaxSizeCapGB,       -- NULL = no cap (unlimited) on any data file
             Recommendation = CASE
                 WHEN v.VolumeFreeGB IS NULL THEN 'UNKNOWN - could not read volume stats'
                 WHEN mat.IsShortfallMaterial = 1
                     THEN 'ADD SPACE - projected free % after a full CHECKDB falls below ' + CAST(@MinVolumeFreePctAfterWork AS VARCHAR(10)) + '% target (add at least '
                         + CAST(shortfall.ShortfallGB AS VARCHAR(20)) + ' GB)'
+                        + CASE WHEN growth.DataFileAutogrowthEnabled = 0
+                            THEN ' NOTE: autogrowth is also DISABLED on at least one of this database''s data files - even with more volume space, the file itself will not grow automatically if needed.'
+                            ELSE '' END
+                        + CASE WHEN growth.DataFileMaxSizeCapGB IS NOT NULL AND growth.DataFileRemainingToCapGB IS NOT NULL AND growth.DataFileRemainingToCapGB < shortfall.ShortfallGB
+                            THEN ' NOTE: a max size cap of ' + CAST(growth.DataFileMaxSizeCapGB AS VARCHAR(20)) + ' GB leaves only ' + CAST(growth.DataFileRemainingToCapGB AS VARCHAR(20))
+                                + ' GB of headroom before hitting that limit - raise or remove the cap in addition to adding volume space.'
+                            ELSE '' END
                 WHEN shortfall.ShortfallGB > 0
                     THEN 'OK (within estimate margin) - a small ' + CAST(shortfall.ShortfallGB AS VARCHAR(20)) + ' GB gap below the ' + CAST(@MinVolumeFreePctAfterWork AS VARCHAR(10))
                         + '% target exists but is below the materiality threshold (' + CAST(@MinMaterialShortfallGB AS VARCHAR(10)) + ' GB / ' + CAST(@MinMaterialShortfallPct AS VARCHAR(10))
@@ -286,6 +328,7 @@ BEGIN
             END
         FROM #Databases db
         LEFT JOIN DbVol v ON v.DatabaseName = db.DatabaseName AND v.rn = 1
+        LEFT JOIN DbGrowth growth ON growth.DatabaseName = db.DatabaseName
         CROSS APPLY (
             -- Required free space to still meet @MinVolumeFreePctAfterWork
             -- after the estimated full-CHECKDB snapshot headroom is consumed.
@@ -366,6 +409,8 @@ BEGIN
             ProjectedFreePct_AfterFullCheckdb = CAST(@InstProjectedFreeGB * 100.0 / NULLIF(@InstanceTotalGB, 0) AS DECIMAL(5,2)),
             ShortfallGB          = @InstShortfallGB,
             IsShortfallMaterial  = @InstIsShortfallMaterial,
+            DataFileAutogrowthEnabled = CAST(NULL AS BIT),        -- not applicable on MI (shared instance-wide storage quota, not per-file)
+            DataFileMaxSizeCapGB      = CAST(NULL AS DECIMAL(18,2)),
             Recommendation = CASE
                 WHEN @InstanceTotalGB IS NULL THEN 'UNKNOWN - insufficient permission or DMV not yet populated (needs VIEW SERVER STATE / VIEW DATABASE PERFORMANCE STATE)'
                 WHEN @InstIsShortfallMaterial = 0 AND @InstShortfallGB > 0

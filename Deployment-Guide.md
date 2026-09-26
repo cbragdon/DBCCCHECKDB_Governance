@@ -92,6 +92,21 @@ This check doesn't apply on Managed Instance (tempdb sizing there is
 fixed by service tier and isn't manually resizable), so these four
 columns report `NULL` for MI rows.
 
+**Data-file growth-safety check (box product only, result set 1):** the
+same class of check applies to the per-database volume headroom result
+set — but with a twist, since "ADD SPACE" there means adding physical
+disk capacity, not something SQL Server can autogrow into on its own.
+Once you add that disk space, can the database's own data file(s)
+actually use it? `DataFileAutogrowthEnabled` and `DataFileMaxSizeCapGB`
+report whether the affected database has autogrowth disabled or a
+restrictive max-size cap on its data file(s). If the volume shortfall is
+material AND either of those is a problem, the `Recommendation` appends
+a note explaining that adding disk space alone won't fully solve it — the
+file-level setting (enable autogrowth, and/or raise or remove the max-size
+cap) needs adjusting too. Not applicable on Managed Instance (storage
+there is a shared instance-wide quota, not governed by per-file settings),
+so both columns report `NULL` for MI rows.
+
 ## Step 1: Install Ola Hallengren's Maintenance Solution
 
 If not already installed on the target instance, download and run
