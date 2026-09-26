@@ -66,13 +66,14 @@ file in this folder and what it does.
 -- 1. Install Ola Hallengren's MaintenanceSolution.sql first (not included here).
 
 -- 2. Deploy the tiering procedures to the same database as Hallengren's scripts
---    (commonly [master] or a dedicated [DBA] database):
+--    (a DEDICATED maintenance database, e.g. [DBAdmin] or [DBA] - NEVER [master]):
 :r Run_TieredIntegrityCheck.sql
 :r Rotate_VLDB_ObjectLevelChecks.sql
 :r Run_LargeTier_WeeklyFullCheck.sql
 
--- 3. Edit @VLDBDatabaseList in Deploy_SQLAgentJobs.sql if you have VLDB databases,
---    then deploy the SQL Agent jobs (nightly tiered check, weekly VLDB rotation,
+-- 3. Edit @MaintenanceDB (must not be 'master') and @VLDBDatabaseList in
+--    Deploy_SQLAgentJobs.sql if you have VLDB databases, then deploy the
+--    SQL Agent jobs (nightly tiered check, weekly VLDB rotation,
 --    weekly Large-tier full check):
 :r Deploy_SQLAgentJobs.sql
 
@@ -82,6 +83,11 @@ EXEC dbo.Run_TieredIntegrityCheck;
 -- 5. Monitor for failures AND interrupted/orphaned runs (e.g. after a patching
 --    reboot mid-check):
 :r Monitor_CommandLog_Status.sql
+
+-- 6. After the jobs have run a few times, verify the schedule doesn't create
+--    overlapping runs (violates the sequential-execution sizing assumption):
+:r Check_JobScheduleOverlap.sql
+EXEC dbo.Check_JobScheduleOverlap;
 ```
 
 See `Deployment-Guide.md` for full details, and `Tiering-Strategy.md` /

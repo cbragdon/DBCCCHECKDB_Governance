@@ -117,9 +117,9 @@ only) from:
 - https://ola.hallengren.com/
 - https://github.com/olahallengren/sql-server-maintenance-solution
 
-Choose an install database — commonly `[master]` or a dedicated `[DBA]`
-database. Note which one you choose; the procedures in this folder must be
-deployed to the **same database**.
+Choose an install database — a **dedicated maintenance database** (e.g.
+`[DBAdmin]` or `[DBA]`) — **never `[master]`**. Note which one you choose;
+the procedures in this folder must be deployed to the **same database**.
 
 Confirm install succeeded:
 
@@ -230,8 +230,12 @@ command.
 ## Step 5: Deploy SQL Agent jobs
 
 1. Open `Deploy_SQLAgentJobs.sql`.
-2. Update `@MaintenanceDB` if you used a database other than `[master]` in
-   Step 1/2.
+2. **Required:** set `@MaintenanceDB` (appears three times, once per job
+   block) to the same database you used in Step 1/2 — e.g. `'DBAdmin'`. This
+   has **no default and must be edited**: the script deliberately
+   `RAISERROR`s and stops if left as the placeholder `'YourMaintenanceDB'`
+   or set to `'master'`, since no procedure in this project (or Ola
+   Hallengren's toolkit) should ever be deployed to `master`.
 3. Update `@VLDBDatabaseList` (appears twice: once as a variable, once inline
    in the job step `@command`) with your actual VLDB database names, or
    remove/skip Job 2 entirely if you have no VLDB-tier databases.
@@ -248,6 +252,26 @@ configuration — it calls `Run_LargeTier_WeeklyFullCheck`, which identifies
 Large-tier databases dynamically the same way `Run_TieredIntegrityCheck`
 does. Only deploy/enable it if you actually have Large-tier (500 GB - 2 TB)
 databases; otherwise it's a no-op (logs an informational message and exits).
+
+**Verify the schedule doesn't create overlapping runs.** All three default
+schedules start at 01:00 (nightly job daily, both weekly jobs on their
+respective day) — if the nightly job is still running a Large/VLDB
+PHYSICAL_ONLY check when a weekly job kicks off, both compete for the same
+disk/tempdb headroom at once, silently invalidating the sequential-execution
+assumption behind the sizing report in Step 0. Deploy and run
+`Check_JobScheduleOverlap.sql` after the jobs have executed at least once
+(ideally a few times, across their heaviest workload):
+
+```sql
+:r Check_JobScheduleOverlap.sql
+EXEC dbo.Check_JobScheduleOverlap;
+```
+
+It flags any pair of jobs whose scheduled windows can genuinely overlap
+based on OBSERVED run history (not a guess), and suggests either
+rescheduling with a wider buffer or re-sizing headroom for the sum of the
+overlapping jobs' concurrent needs. Pairs show `UNKNOWN (no run history
+yet)` until both jobs involved have completed at least one run.
 
 ## Step 6: Deploy to AlwaysOn AG secondary replicas / additional instances
 

@@ -6,11 +6,21 @@
    Creates the SQL Agent jobs that call the tiered integrity check procedures.
    Run this AFTER:
      1. Ola Hallengren's MaintenanceSolution.sql (or DatabaseIntegrityCheck.sql)
-        has been installed in the target maintenance database (commonly [master]
-        or a dedicated [DBA] database).
+        has been installed in a DEDICATED maintenance database (e.g. [DBAdmin]
+        or [DBA] - NEVER [master]; see below).
      2. Run_TieredIntegrityCheck.sql has been deployed to the SAME database.
      3. Rotate_VLDB_ObjectLevelChecks.sql has been deployed to the SAME database
         (only needed if you have VLDB-tier databases).
+
+ IMPORTANT - never deploy to [master]:
+   @MaintenanceDB below MUST be set to your dedicated maintenance database
+   (e.g. 'DBAdmin') before running this script - it intentionally has NO
+   default and will RAISERROR/stop if left as the placeholder. User objects
+   (including Ola Hallengren's toolkit and every proc in this project)
+   should never be created in [master] - among other reasons, it complicates
+   future upgrades/migrations, isn't covered by normal user-database backup
+   policies, and (on box product) executes in the context of every login's
+   default database resolution in ways a dedicated database avoids.
 
  NOTE for Azure SQL Managed Instance:
    MI supports SQL Agent jobs natively (unlike Azure SQL Database), so this
@@ -18,15 +28,21 @@
    enabled for your MI instance (it is by default).
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-25
+ Updated: 2026-09-26
 ================================================================================
 */
 
 USE msdb;
 GO
 
-DECLARE @MaintenanceDB SYSNAME = N'master';  -- change to your maintenance DB if different
+DECLARE @MaintenanceDB SYSNAME = N'YourMaintenanceDB';  -- EDIT ME - e.g. 'DBAdmin' - MUST NOT be 'master'
 DECLARE @JobOwner SYSNAME = N'sa';           -- change to your standard job-owner login
+
+IF @MaintenanceDB = N'YourMaintenanceDB' OR @MaintenanceDB = N'master'
+BEGIN
+    RAISERROR('Set @MaintenanceDB to your dedicated maintenance database (e.g. ''DBAdmin'') before running this script - it must not be left as the placeholder or set to ''master''.', 16, 1);
+    RETURN;
+END
 
 ------------------------------------------------------------------
 -- Job 1: Nightly tiered integrity check (Small/Medium full CHECKDB,
@@ -73,9 +89,15 @@ GO
 -- for databases too large for nightly full CHECKDB). Only needed if
 -- you have VLDB-tier (>= 2 TB) databases.
 ------------------------------------------------------------------
-DECLARE @MaintenanceDB SYSNAME = N'master';
+DECLARE @MaintenanceDB SYSNAME = N'YourMaintenanceDB';  -- EDIT ME - e.g. 'DBAdmin' - MUST NOT be 'master'
 DECLARE @JobOwner SYSNAME = N'sa';
 DECLARE @VLDBDatabaseList NVARCHAR(MAX) = N'YourVLDBDatabase1,YourVLDBDatabase2'; -- EDIT ME
+
+IF @MaintenanceDB = N'YourMaintenanceDB' OR @MaintenanceDB = N'master'
+BEGIN
+    RAISERROR('Set @MaintenanceDB to your dedicated maintenance database (e.g. ''DBAdmin'') before running this script - it must not be left as the placeholder or set to ''master''.', 16, 1);
+    RETURN;
+END
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA - Weekly VLDB Object Rotation Check')
 BEGIN
@@ -122,8 +144,14 @@ GO
 -- different night than Job 2 to avoid both large-scale checks
 -- contending for the same maintenance window.
 ------------------------------------------------------------------
-DECLARE @MaintenanceDB SYSNAME = N'master';
+DECLARE @MaintenanceDB SYSNAME = N'YourMaintenanceDB';  -- EDIT ME - e.g. 'DBAdmin' - MUST NOT be 'master'
 DECLARE @JobOwner SYSNAME = N'sa';
+
+IF @MaintenanceDB = N'YourMaintenanceDB' OR @MaintenanceDB = N'master'
+BEGIN
+    RAISERROR('Set @MaintenanceDB to your dedicated maintenance database (e.g. ''DBAdmin'') before running this script - it must not be left as the placeholder or set to ''master''.', 16, 1);
+    RETURN;
+END
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA - Weekly Large Tier Full Check')
 BEGIN
