@@ -18,11 +18,6 @@
      6. Check_JobScheduleOverlap.sql
 
    What this script deliberately does NOT do:
-     - Install Ola Hallengren's Maintenance Solution. That's a prerequisite
-       this script CHECKS FOR (dbo.DatabaseIntegrityCheck must already exist
-       in the target maintenance database) and skips the target with a
-       clear error if missing - it does not install it for you. Get it from
-       https://ola.hallengren.com/.
      - Deploy Deploy_SQLAgentJobs.sql (the SQL Agent jobs/schedules). That
        script requires a per-instance @VLDBDatabaseList edit (which VLDB-tier
        databases exist on THIS instance) and is intentionally left as a
@@ -33,6 +28,22 @@
      - Use SQL authentication, ever. Auth is auto-detected per target and is
        always either Windows Integrated Auth (box product) or Azure AD
        (Managed Instance) - see "Authentication" below.
+
+ Prerequisite auto-install (Ola Hallengren's Maintenance Solution):
+   This project's procedures are built entirely on top of Ola Hallengren's
+   dbo.DatabaseIntegrityCheck, so it must exist in the target maintenance
+   database first. This script checks for it on every target and, if
+   missing, AUTOMATICALLY installs the three files it depends on
+   (CommandLog.sql, CommandExecute.sql, DatabaseIntegrityCheck.sql) from the
+   vetted, unmodified, MIT-licensed copies bundled in
+   vendor\OlaHallengrenMaintenanceSolution\ in this same repo (see that
+   folder's README.md for license/attribution/version details) - no
+   internet access from the target SQL Server is required. This is logged
+   clearly per target (`[AUTO-INSTALLED]`) and recorded in the returned
+   result objects via the `HallengrenAutoInstalled` column, so it's always
+   visible which targets got this vs. already had it. Pass
+   -SkipHallengrenAutoInstall to disable this and go back to
+   fail-with-a-clear-error-if-missing behavior instead.
 
  Authentication (auto-detected per target, never SQL auth):
    - Server names ending in '.database.windows.net' are treated as Azure SQL
@@ -62,6 +73,9 @@
 
    # Large deployment via CSV, explicit default database override:
    .\Install-DBCCGovernanceToolkit.ps1 -CsvPath .\Targets.csv -MaintenanceDB 'DBAdmin'
+
+   # Require Hallengren's toolkit to already be installed - fail instead of auto-installing it:
+   .\Install-DBCCGovernanceToolkit.ps1 -CsvPath .\Targets.csv -SkipHallengrenAutoInstall
 
    # Preview what would run without making any changes:
    .\Install-DBCCGovernanceToolkit.ps1 -CsvPath .\Targets.csv -WhatIf
@@ -94,7 +108,11 @@ param(
     [string] $MaintenanceDB = 'DBAdmin',
 
     # Folder containing the .sql files. Defaults to this script's own folder.
-    [string] $ScriptFolder = $PSScriptRoot
+    [string] $ScriptFolder = $PSScriptRoot,
+
+    # Disable auto-installing Ola Hallengren's prerequisite scripts when
+    # missing - revert to failing the target with a clear error instead.
+    [switch] $SkipHallengrenAutoInstall
 )
 
 $ErrorActionPreference = 'Continue'
@@ -118,6 +136,21 @@ foreach ($file in $ProcedureFiles) {
     $fullPath = Join-Path $ScriptFolder $file
     if (-not (Test-Path $fullPath -PathType Leaf)) {
         throw "Required file not found: $fullPath (run this script from the project folder, or pass -ScriptFolder)."
+    }
+}
+
+# Bundled, MIT-licensed, unmodified copies of the three Ola Hallengren files
+# this project's auto-install feature uses when a target is missing the
+# prerequisite - see vendor\OlaHallengrenMaintenanceSolution\README.md.
+$HallengrenVendorFolder = Join-Path $ScriptFolder 'vendor\OlaHallengrenMaintenanceSolution'
+$HallengrenFiles = @('CommandLog.sql', 'CommandExecute.sql', 'DatabaseIntegrityCheck.sql')
+
+if (-not $SkipHallengrenAutoInstall) {
+    foreach ($file in $HallengrenFiles) {
+        $fullPath = Join-Path $HallengrenVendorFolder $file
+        if (-not (Test-Path $fullPath -PathType Leaf)) {
+            throw "Prerequisite auto-install is enabled but a required vendor file is missing: $fullPath. Either restore vendor\OlaHallengrenMaintenanceSolution\, or pass -SkipHallengrenAutoInstall."
+        }
     }
 }
 
@@ -166,6 +199,7 @@ $results = @(foreach ($target in $targets) {
     $filesDeployed = @()
     $filesFailed   = @()
     $prereqOk      = $false
+    $hallengrenAutoInstalled = $false
     $status        = 'Not attempted'
 
     try {
@@ -179,15 +213,54 @@ $results = @(foreach ($target in $targets) {
 
             $prereqOutput = & sqlcmd @prereqArgs 2>&1
             $prereqExit = $LASTEXITCODE
+            $prereqMissing = ($prereqExit -ne 0 -or ($prereqOutput -join "`n") -notmatch 'PREREQ_OK')
 
-            if ($prereqExit -ne 0 -or ($prereqOutput -join "`n") -notmatch 'PREREQ_OK') {
+            if ($prereqMissing -and -not $SkipHallengrenAutoInstall) {
+                Write-Host "  [INFO] Prerequisite not found in [$db] - auto-installing Ola Hallengren's Maintenance Solution (CommandLog, CommandExecute, DatabaseIntegrityCheck) from the bundled vendor copy..." -ForegroundColor Yellow
+
+                $hallengrenInstallFailed = $false
+                foreach ($hfile in $HallengrenFiles) {
+                    $hFullPath = Join-Path $HallengrenVendorFolder $hfile
+                    $hArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-i', $hFullPath)
+                    $hOutput = & sqlcmd @hArgs 2>&1
+                    $hExit = $LASTEXITCODE
+
+                    if ($hExit -eq 0) {
+                        Write-Host "  [AUTO-INSTALLED] $hfile" -ForegroundColor Yellow
+                    } else {
+                        $hallengrenInstallFailed = $true
+                        Write-Host "  [FAIL] Auto-install of $hfile failed (exit $hExit)." -ForegroundColor Red
+                        $hOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+                    }
+                }
+
+                if (-not $hallengrenInstallFailed) {
+                    # Re-check the prerequisite now that the vendor files have
+                    # been deployed, rather than assuming success.
+                    $recheckOutput = & sqlcmd @prereqArgs 2>&1
+                    $recheckExit = $LASTEXITCODE
+                    if ($recheckExit -eq 0 -and ($recheckOutput -join "`n") -match 'PREREQ_OK') {
+                        $prereqMissing = $false
+                        $hallengrenAutoInstalled = $true
+                        Write-Host "  [OK] Prerequisite auto-install succeeded - DatabaseIntegrityCheck now present in [$db]." -ForegroundColor Green
+                    }
+                }
+            }
+
+            if ($prereqMissing) {
                 $status = 'FAILED - prerequisite missing or connection failed'
                 Write-Host "  [FAIL] Prerequisite check: Ola Hallengren's DatabaseIntegrityCheck not found in [$db] (or could not connect)." -ForegroundColor Red
-                Write-Host "         Install https://ola.hallengren.com/ to [$db] first, then re-run this target." -ForegroundColor Red
+                if ($SkipHallengrenAutoInstall) {
+                    Write-Host "         Auto-install is disabled (-SkipHallengrenAutoInstall) - install https://ola.hallengren.com/ to [$db] first, then re-run this target." -ForegroundColor Red
+                } else {
+                    Write-Host "         Auto-install was attempted and failed - see errors above. Install https://ola.hallengren.com/ to [$db] manually, then re-run this target." -ForegroundColor Red
+                }
                 $prereqOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
             } else {
                 $prereqOk = $true
-                Write-Host "  [OK] Prerequisite check passed (DatabaseIntegrityCheck found in [$db])." -ForegroundColor Green
+                if (-not $hallengrenAutoInstalled) {
+                    Write-Host "  [OK] Prerequisite check passed (DatabaseIntegrityCheck found in [$db])." -ForegroundColor Green
+                }
 
                 foreach ($file in $ProcedureFiles) {
                     $fullPath = Join-Path $ScriptFolder $file
@@ -224,6 +297,7 @@ $results = @(foreach ($target in $targets) {
         MaintenanceDB   = $db
         AuthType        = $authLabel
         PrereqOk        = $prereqOk
+        HallengrenAutoInstalled = $hallengrenAutoInstalled
         ProceduresOk    = $filesDeployed.Count
         ProceduresFailed = $filesFailed.Count
         FailedFiles     = ($filesFailed -join '; ')
@@ -240,6 +314,11 @@ if ($failCount -gt 0) {
     Write-Host "$failCount of $($results.Count) target(s) had failures - see Status/FailedFiles columns above." -ForegroundColor Yellow
 } else {
     Write-Host "All targets completed successfully." -ForegroundColor Green
+}
+
+$autoInstalledCount = @($results | Where-Object { $_.HallengrenAutoInstalled }).Count
+if ($autoInstalledCount -gt 0) {
+    Write-Host "NOTE: Ola Hallengren's Maintenance Solution prerequisite was auto-installed on $autoInstalledCount target(s) that didn't already have it - see HallengrenAutoInstalled column above." -ForegroundColor Yellow
 }
 
 Write-Host ""

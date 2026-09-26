@@ -127,6 +127,10 @@ Confirm install succeeded:
 SELECT OBJECT_ID('dbo.DatabaseIntegrityCheck');  -- should return a non-NULL object_id
 ```
 
+(Deploying to many instances at once? `Install-DBCCGovernanceToolkit.ps1`
+in Step 6 below auto-installs this prerequisite per target if it's missing
+— you can skip this step manually and let that script handle it instead.)
+
 ## Step 2: Deploy the tiering procedures
 
 In the same database as Step 1, run in order:
@@ -286,9 +290,9 @@ on non-primary replicas (full logical checks require primary-equivalent
 access), so it's safe to deploy identically to every replica.
 
 **Deploying Steps 1–5 to many instances at once:** for more than a handful
-of VMs/MIs, `Install-DBCCGovernanceToolkit.ps1` automates Step 2 (Step 1 —
-Ola Hallengren's toolkit — is still a manual prerequisite it checks for but
-does not install) across a whole list of targets in one run:
+of VMs/MIs, `Install-DBCCGovernanceToolkit.ps1` automates both Step 1
+(Ola Hallengren's toolkit) and Step 2 across a whole list of targets in one
+run:
 
 ```powershell
 # A couple of targets directly - auth is auto-detected per target
@@ -300,15 +304,25 @@ does not install) across a whole list of targets in one run:
 .\Install-DBCCGovernanceToolkit.ps1 -CsvPath .\Targets.csv -MaintenanceDB 'DBAdmin'
 ```
 
-It checks the `DatabaseIntegrityCheck` prerequisite per target first (skips
-with a clear error if Hallengren's toolkit isn't installed there yet),
-deploys the six procedures in dependency order, and — critically — one
-target's failure never stops the run; it's logged and the script moves on
-to the next target. It deliberately does **not** deploy
-`Deploy_SQLAgentJobs.sql` (Step 5 below) — that step needs a per-instance
-`@VLDBDatabaseList` review and is left as an explicit, reviewed action per
-target. Supports `-WhatIf` for a dry run and returns result objects (pipe to
-`Export-Csv` for a deployment record).
+It checks the `DatabaseIntegrityCheck` prerequisite per target first. **If
+it's missing, the prerequisite is auto-installed** — `CommandLog.sql`,
+`CommandExecute.sql`, and `DatabaseIntegrityCheck.sql` are deployed from the
+vetted, unmodified, MIT-licensed copies bundled in
+`vendor/OlaHallengrenMaintenanceSolution/` in this repo, so no internet
+access is required from the target SQL Server itself. This is always logged
+per target (look for `[AUTO-INSTALLED]` in the console output) and recorded
+in the `HallengrenAutoInstalled` column of the returned result objects, so
+it's obvious after the fact which targets already had the prerequisite vs.
+got it installed by this run. Pass `-SkipHallengrenAutoInstall` if you'd
+rather the script fail a target with a clear error instead (e.g. if you
+manage Hallengren's toolkit version centrally and don't want this script
+touching it). Either way, it then deploys the six procedures in dependency
+order, and — critically — one target's failure never stops the run; it's
+logged and the script moves on to the next target. It deliberately does
+**not** deploy `Deploy_SQLAgentJobs.sql` (Step 5 below) — that step needs a
+per-instance `@VLDBDatabaseList` review and is left as an explicit, reviewed
+action per target. Supports `-WhatIf` for a dry run and returns result
+objects (pipe to `Export-Csv` for a deployment record).
 
 ## Step 7: Monitoring / ongoing operations
 
