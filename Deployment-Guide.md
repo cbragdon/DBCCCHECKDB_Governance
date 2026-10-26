@@ -240,9 +240,10 @@ command.
    `RAISERROR`s and stops if left as the placeholder `'YourMaintenanceDB'`
    or set to `'master'`, since no procedure in this project (or Ola
    Hallengren's toolkit) should ever be deployed to `master`.
-3. Update `@VLDBDatabaseList` (appears twice: once as a variable, once inline
-   in the job step `@command`) with your actual VLDB database names, or
-   remove/skip Job 2 entirely if you have no VLDB-tier databases.
+3. Set `@VLDBDatabaseList` (in the Job 2 block) to your actual VLDB database
+   names, comma-separated. Job 2's step runs exactly that list. If you have
+   no VLDB-tier databases, leave the placeholder: Job 2 is then not created
+   (the script prints an INFO message and carries on with Job 3).
 4. Run the script.
 5. Verify all three jobs were created:
 
@@ -374,6 +375,16 @@ It prints one PASS/FAIL row per test plus a summary, and raises an error
 boundary (Step 3), any `@MinMaterialShortfallGB`/`@MinMaterialShortfallPct`
 value, or the overlap-detection math in `Check_JobScheduleOverlap.sql`.
 
+`Tests_CoreLogic.sql` checks copies of expressions, so it cannot notice a
+change to the procedures themselves. The checks in `tests/checks/` run the
+**installed** procedures against throwaway `DBCCGovTest_*` databases (see
+the README's Testing section). Run them on a test instance, ideally through
+the runner, which uses a disposable maintenance database:
+
+```powershell
+.\tests\Run-Checks.ps1 -ServerName <test-instance> -CompatibilityLevel 110,130,150,170
+```
+
 ## Uninstall / rollback
 
 ```sql
@@ -386,6 +397,9 @@ EXEC msdb.dbo.sp_delete_job @job_name = N'DBA - Weekly Large Tier Full Check';
 DROP PROCEDURE IF EXISTS dbo.Run_TieredIntegrityCheck;
 DROP PROCEDURE IF EXISTS dbo.Rotate_VLDB_ObjectLevelChecks;
 DROP PROCEDURE IF EXISTS dbo.Run_LargeTier_WeeklyFullCheck;
+DROP PROCEDURE IF EXISTS dbo.Check_DiskAndTempdbHeadroom;
+DROP PROCEDURE IF EXISTS dbo.Precheck_RequiredSpaceForSetup;
+DROP PROCEDURE IF EXISTS dbo.Check_JobScheduleOverlap;
 DROP TABLE IF EXISTS dbo.VLDB_CheckRotationLog;
 
 -- Ola Hallengren's own procedures/objects are left untouched; remove

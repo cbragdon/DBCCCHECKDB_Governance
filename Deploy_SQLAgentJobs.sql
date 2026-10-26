@@ -28,7 +28,7 @@
    enabled for your MI instance (it is by default).
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-26
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -51,6 +51,8 @@ END
 ------------------------------------------------------------------
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA - Nightly Tiered Integrity Check')
 BEGIN
+    DECLARE @ScheduleId INT;
+
     EXEC msdb.dbo.sp_add_job
         @job_name = N'DBA - Nightly Tiered Integrity Check',
         @enabled = 1,
@@ -68,15 +70,18 @@ BEGIN
         @retry_attempts = 1,
         @retry_interval = 5;
 
+    -- Attach by the new schedule's id, not its name: schedule names are not
+    -- unique in msdb, and attaching by a name that already exists fails.
     EXEC msdb.dbo.sp_add_schedule
         @schedule_name = N'Nightly 01:00',
         @freq_type = 4,              -- daily
         @freq_interval = 1,
-        @active_start_time = 010000; -- 01:00:00
+        @active_start_time = 010000, -- 01:00:00
+        @schedule_id = @ScheduleId OUTPUT;
 
     EXEC msdb.dbo.sp_attach_schedule
         @job_name = N'DBA - Nightly Tiered Integrity Check',
-        @schedule_name = N'Nightly 01:00';
+        @schedule_id = @ScheduleId;
 
     EXEC msdb.dbo.sp_add_jobserver
         @job_name = N'DBA - Nightly Tiered Integrity Check',
@@ -87,11 +92,13 @@ GO
 ------------------------------------------------------------------
 -- Job 2: Weekly VLDB object-level rotation (full logical coverage
 -- for databases too large for nightly full CHECKDB). Only needed if
--- you have VLDB-tier (>= 2 TB) databases.
+-- you have VLDB-tier (>= 2 TB) databases. The job step runs exactly
+-- the list in @VLDBDatabaseList; if you leave the placeholder in
+-- place, this job is not created.
 ------------------------------------------------------------------
 DECLARE @MaintenanceDB SYSNAME = N'YourMaintenanceDB';  -- EDIT ME - e.g. 'DBAdmin' - MUST NOT be 'master'
 DECLARE @JobOwner SYSNAME = N'sa';
-DECLARE @VLDBDatabaseList NVARCHAR(MAX) = N'YourVLDBDatabase1,YourVLDBDatabase2'; -- EDIT ME
+DECLARE @VLDBDatabaseList NVARCHAR(MAX) = N'YourVLDBDatabase1,YourVLDBDatabase2'; -- EDIT ME (comma-separated)
 
 IF @MaintenanceDB = N'YourMaintenanceDB' OR @MaintenanceDB = N'master'
 BEGIN
@@ -99,8 +106,20 @@ BEGIN
     RETURN;
 END
 
+IF @VLDBDatabaseList IS NULL OR LTRIM(RTRIM(@VLDBDatabaseList)) = N'' OR @VLDBDatabaseList = N'YourVLDBDatabase1,YourVLDBDatabase2'
+BEGIN
+    RAISERROR('INFO: @VLDBDatabaseList is still the placeholder (or empty) - the weekly VLDB rotation job was NOT created. Set it to this instance''s VLDB-tier databases and re-run this script if you need the job.', 10, 1);
+    RETURN;
+END
+
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA - Weekly VLDB Object Rotation Check')
 BEGIN
+    DECLARE @ScheduleId INT;
+    -- The list becomes a quoted N'...' literal inside the job step; doubling
+    -- single quotes keeps a database name containing an apostrophe intact.
+    DECLARE @RotationCommand NVARCHAR(MAX) = N'EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases = N'''
+        + REPLACE(@VLDBDatabaseList, N'''', N'''''') + N''', @DaysInCycle = 7, @TimeLimitSeconds = 21600;';
+
     EXEC msdb.dbo.sp_add_job
         @job_name = N'DBA - Weekly VLDB Object Rotation Check',
         @enabled = 1,
@@ -112,7 +131,7 @@ BEGIN
         @step_name = N'Run VLDB Rotation Check',
         @subsystem = N'TSQL',
         @database_name = @MaintenanceDB,
-        @command = N'EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases = ''YourVLDBDatabase1,YourVLDBDatabase2'', @DaysInCycle = 7, @TimeLimitSeconds = 21600;', -- EDIT database list
+        @command = @RotationCommand,
         @on_success_action = 1,
         @on_fail_action = 2,
         @retry_attempts = 1,
@@ -123,11 +142,12 @@ BEGIN
         @freq_type = 8,               -- weekly
         @freq_interval = 1,           -- Sunday
         @freq_recurrence_factor = 1,
-        @active_start_time = 010000;
+        @active_start_time = 010000,
+        @schedule_id = @ScheduleId OUTPUT;
 
     EXEC msdb.dbo.sp_attach_schedule
         @job_name = N'DBA - Weekly VLDB Object Rotation Check',
-        @schedule_name = N'Weekly Sunday 01:00';
+        @schedule_id = @ScheduleId;
 
     EXEC msdb.dbo.sp_add_jobserver
         @job_name = N'DBA - Weekly VLDB Object Rotation Check',
@@ -155,6 +175,8 @@ END
 
 IF NOT EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'DBA - Weekly Large Tier Full Check')
 BEGIN
+    DECLARE @ScheduleId INT;
+
     EXEC msdb.dbo.sp_add_job
         @job_name = N'DBA - Weekly Large Tier Full Check',
         @enabled = 1,
@@ -177,11 +199,12 @@ BEGIN
         @freq_type = 8,               -- weekly
         @freq_interval = 8,           -- Wednesday
         @freq_recurrence_factor = 1,
-        @active_start_time = 010000;
+        @active_start_time = 010000,
+        @schedule_id = @ScheduleId OUTPUT;
 
     EXEC msdb.dbo.sp_attach_schedule
         @job_name = N'DBA - Weekly Large Tier Full Check',
-        @schedule_name = N'Weekly Wednesday 01:00';
+        @schedule_id = @ScheduleId;
 
     EXEC msdb.dbo.sp_add_jobserver
         @job_name = N'DBA - Weekly Large Tier Full Check',

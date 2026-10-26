@@ -10,6 +10,35 @@
 | Azure SQL Managed Instance (General Purpose & Business Critical) | Full support |
 | Azure SQL Database (single-db PaaS) | **Not supported** — `Run_TieredIntegrityCheck` explicitly rejects `EngineEdition = 5`. Use Hallengren's `MaintenanceSolutionAzureSQLDatabase.sql` instead. |
 
+What has actually been run end to end so far is SQL Server 2025 (box
+product); see [`docs/LOCAL_TEST_RESULTS_20261026.md`](docs/LOCAL_TEST_RESULTS_20261026.md)
+for what was and was not tested.
+
+## Maintenance database compatibility level
+
+The maintenance database (where the toolkit and Hallengren's procedures
+live) must be at compatibility level **110 or higher**: Hallengren's
+`DatabaseIntegrityCheck` does not compile below 110, and
+`Install-DBCCGovernanceToolkit.ps1` stops cleanly for such a database. The
+toolkit itself no longer uses `STRING_SPLIT`, so it does not need 130.
+Tested at 110, 120, 130, 140, 150, 160 and 170, each with the legacy
+cardinality estimator off and on. The databases being checked can be at
+any compatibility level.
+
+## Database names
+
+Lists passed to `DatabaseIntegrityCheck` are built with `QUOTENAME` and
+without XML escaping. Tested: database names containing `&`, `<`, `>` and
+`'` are checked normally, and the VLDB rotation handles schema and table
+names containing `.`, `'` and `]`. Two limits remain, both from how
+`DatabaseIntegrityCheck` reads its `@Databases` list:
+
+- A database whose name contains a **comma** cannot be passed to it. The
+  nightly and weekly procedures leave such databases out and say so in a
+  `WARNING`/`INFO` message instead of failing silently.
+- `DatabaseIntegrityCheck` matches names with `LIKE`, so a `%` in a
+  database name acts as a wildcard there.
+
 ## Ola Hallengren's Maintenance Solution
 
 Confirmed to fully support SQL Server 2025 (including new features like ZSTD
@@ -26,14 +55,20 @@ The scripts in this folder build **on top of** Hallengren's
   and cannot reliably run against read-intent-only secondary replicas —
   logical/extended logical checks can fail silently or error there.
 - **`PHYSICAL_ONLY` checks are safe on both primary and secondary replicas.**
-- `Run_TieredIntegrityCheck` detects AG role via
-  `sys.dm_hadr_availability_group_states` and:
-  - Runs Small/Medium tier **full CHECKDB only on the primary**.
+- `Run_TieredIntegrityCheck` decides the AG role **per database**, from
+  this replica's own row in `sys.dm_hadr_database_replica_states`
+  (`is_local = 1`, `is_primary_replica`), and:
+  - Runs Small/Medium tier **full CHECKDB only where this replica is the
+    primary** for that database.
   - Runs Large/VLDB tier **`PHYSICAL_ONLY` on both primary and secondary**
     replicas (identical job/schedule can be deployed to every replica).
-- On standalone instances or General Purpose tier Managed Instance (no AG
-  present), the role check returns `NULL` and is treated as primary, so full
-  checks are not skipped incorrectly.
+  - `Run_LargeTier_WeeklyFullCheck` likewise skips only the Large-tier
+    databases this replica is secondary for.
+- A database with no row there - every database on a standalone instance or
+  General Purpose tier Managed Instance, and databases outside any AG on an
+  AG replica - is treated as primary, so full checks are not skipped
+  incorrectly. Because the check is one row per database, instances with
+  several AGs (primary for one, secondary for another) are handled too.
 - Business Critical tier Managed Instance uses AG-based HA internally, so the
   same AG-role logic applies there without modification.
 

@@ -39,20 +39,21 @@
    Works unchanged on both box product and Managed Instance - MI supports
    SQL Agent jobs natively and msdb is queried identically on both.
 
- Limitation - midnight-crossing runs:
-   The overlap math treats each job's scheduled day as a single 24-hour
-   window starting at its active_start_time; if a job's observed duration
-   would carry it past midnight into the next calendar day, this is
-   flagged separately (`CrossesMidnight = 1`) rather than silently
-   mis-computed, since which day's schedule to compare against becomes
-   ambiguous.
+ Midnight-crossing runs:
+   Each schedule is laid out on a 7-day timeline (one run window per
+   active day, Sunday 00:00 = second 0), and windows are compared across
+   the whole week, including the wrap from Saturday night into Sunday.
+   A run that carries past midnight is therefore compared with the jobs
+   that start the next morning (e.g. a nightly job at 23:00 that runs 4h
+   overlaps a Wednesday 01:00 job). `CrossesMidnight = 1` still marks such
+   pairs for information.
 
  Usage:
    EXEC dbo.Check_JobScheduleOverlap;                      -- last 20 runs per job (default)
    EXEC dbo.Check_JobScheduleOverlap @HistoryRunsToConsider = 50;
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-26
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -124,6 +125,7 @@ BEGIN
     ------------------------------------------------------------------
     IF OBJECT_ID('tempdb..#GovSchedules') IS NOT NULL DROP TABLE #GovSchedules;
     CREATE TABLE #GovSchedules (
+        ScheduleRowId    INT IDENTITY(1,1) PRIMARY KEY,
         job_id           UNIQUEIDENTIFIER,
         JobName           SYSNAME,
         RoleLabel         VARCHAR(40),
@@ -154,11 +156,25 @@ BEGIN
     WHERE s.enabled = 1;
 
     ------------------------------------------------------------------
-    -- Pairwise overlap check: for every distinct pair of governance-job
-    -- schedules that share at least one active day, treat each as an
-    -- interval [StartTimeSec, StartTimeSec + ObservedMaxDurationSec) and
-    -- test for classic interval overlap.
+    -- Pairwise overlap check on a 7-day timeline. Each schedule gets one
+    -- run window per active day: [day * 86400 + StartTimeSec,
+    -- + ObservedMaxDurationSec), half-open. Two schedules overlap when any
+    -- window of one intersects any window of the other, with the second
+    -- one also shifted by -1 / +1 week so a Saturday-night run that
+    -- carries into Sunday is compared too. A pair is reported when the
+    -- schedules share an active day, or when their windows overlap.
     ------------------------------------------------------------------
+    IF OBJECT_ID('tempdb..#GovWindows') IS NOT NULL DROP TABLE #GovWindows;
+    SELECT
+        s.ScheduleRowId,
+        WindowStart = d.DayNo * 86400 + s.StartTimeSec,
+        WindowEnd   = d.DayNo * 86400 + s.StartTimeSec + s.ObservedMaxDurationSec
+    INTO #GovWindows
+    FROM #GovSchedules s
+    CROSS JOIN (VALUES (0), (1), (2), (3), (4), (5), (6)) AS d(DayNo)   -- 0 = Sunday ... 6 = Saturday
+    WHERE (s.ActiveDaysMask & POWER(2, d.DayNo)) <> 0
+      AND s.ObservedMaxDurationSec IS NOT NULL;
+
     SELECT
         JobA                 = a.JobName,
         RoleA                = a.RoleLabel,
@@ -179,8 +195,7 @@ BEGIN
         OverlapAssessment = CASE
             WHEN a.ObservedMaxDurationSec IS NULL OR b.ObservedMaxDurationSec IS NULL
                 THEN 'UNKNOWN (no run history yet) - re-run this check once both jobs have completed at least one run.'
-            WHEN a.StartTimeSec < b.StartTimeSec + b.ObservedMaxDurationSec
-                 AND b.StartTimeSec < a.StartTimeSec + a.ObservedMaxDurationSec
+            WHEN ov.Overlaps = 1
                 THEN 'OVERLAP RISK - based on observed history, these jobs'' scheduled windows can overlap on shared active day(s). '
                      + 'Capacity sizing in Precheck_RequiredSpaceForSetup.sql assumes SEQUENTIAL execution - either reschedule one job with '
                      + 'enough buffer after the other''s observed worst-case duration, or re-size headroom for the SUM of both jobs'' concurrent needs.'
@@ -189,7 +204,19 @@ BEGIN
     FROM #GovSchedules a
     JOIN #GovSchedules b
         ON a.job_id < b.job_id                       -- each pair once
-        AND (a.ActiveDaysMask & b.ActiveDaysMask) <> 0   -- share at least one active day of the week
+    CROSS APPLY (
+        SELECT Overlaps = CASE WHEN EXISTS (
+            SELECT 1
+            FROM #GovWindows wa
+            JOIN #GovWindows wb ON wb.ScheduleRowId = b.ScheduleRowId
+            CROSS JOIN (VALUES (-604800), (0), (604800)) AS w(WeekShift)
+            WHERE wa.ScheduleRowId = a.ScheduleRowId
+              AND wa.WindowStart < wb.WindowEnd + w.WeekShift
+              AND wb.WindowStart + w.WeekShift < wa.WindowEnd
+        ) THEN 1 ELSE 0 END
+    ) ov
+    WHERE (a.ActiveDaysMask & b.ActiveDaysMask) <> 0   -- share at least one active day of the week
+       OR ov.Overlaps = 1                              -- or a run carries past midnight into the other's day
     ORDER BY JobA, JobB;
 
     IF NOT EXISTS (SELECT 1 FROM #GovJobs)
@@ -199,5 +226,6 @@ BEGIN
 
     DROP TABLE #GovJobs;
     DROP TABLE #GovSchedules;
+    DROP TABLE #GovWindows;
 END
 GO
