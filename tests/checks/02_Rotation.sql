@@ -165,6 +165,46 @@ BEGIN TRY
     SELECT @Checked = COUNT(DISTINCT ObjectName) FROM dbo.CommandLog WHERE ID > @Start AND CommandType = 'DBCC_CHECKTABLE' AND DatabaseName = N'DBCCGovTest_Many' AND ErrorNumber = 0;
     INSERT INTO #Results (TestName, Passed, Detail)
     VALUES (N'Second database in the same list processed too', CASE WHEN @Checked = 50 THEN 1 ELSE 0 END, N'DBCCGovTest_Many checked=' + CAST(@Checked AS NVARCHAR(10)));
+
+    --------------------------------------------------------------------------
+    -- 5. Names DatabaseIntegrityCheck cannot carry (comma, %): checked directly through CommandExecute.
+    --    a) a database with a comma in its name: time limit 0 stamps nothing; a full run checks and stamps
+    --       every table and logs CHECKALLOC and CHECKCATALOG for it.
+    --    b) an ordinary database with tables named x,y and p%q: all four tables checked and stamped.
+    --------------------------------------------------------------------------
+    EXEC #NewRotationDb N'DBCCGovTest_R,ot', 2;
+    EXEC (N'USE [DBCCGovTest_R,ot]; CREATE TABLE dbo.[x,y] (id INT PRIMARY KEY); CREATE TABLE dbo.[p%q] (id INT PRIMARY KEY);');
+    SELECT @Start = ISNULL(MAX(ID), 0) FROM dbo.CommandLog;
+    BEGIN TRY EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases = N'[DBCCGovTest_R,ot]', @DaysInCycle = 1, @TimeLimitSeconds = 0; SET @Err = NULL; END TRY
+    BEGIN CATCH SET @Err = ERROR_MESSAGE(); END CATCH
+    SELECT @Checked = COUNT(*) FROM dbo.CommandLog WHERE ID > @Start AND DatabaseName = N'DBCCGovTest_R,ot' AND CommandType LIKE 'DBCC[_]%';
+    SELECT @Stamped = COUNT(*) FROM dbo.VLDB_CheckRotationLog WHERE DatabaseName = N'DBCCGovTest_R,ot' AND LastCheckedDate IS NOT NULL;
+    SELECT @Rows = COUNT(*) FROM dbo.VLDB_CheckRotationLog WHERE DatabaseName = N'DBCCGovTest_R,ot';
+    INSERT INTO #Results (TestName, Passed, Detail)
+    VALUES (N'Comma database [DBCCGovTest_R,ot], time limit 0: registered 4, ran nothing, stamped nothing', CASE WHEN @Err IS NULL AND @Rows = 4 AND @Checked = 0 AND @Stamped = 0 THEN 1 ELSE 0 END,
+            N'registered=' + CAST(@Rows AS NVARCHAR(10)) + N' DBCC rows=' + CAST(@Checked AS NVARCHAR(10)) + N' stamped=' + CAST(@Stamped AS NVARCHAR(10)) + ISNULL(N' error=' + @Err, N''));
+
+    SELECT @Start = ISNULL(MAX(ID), 0) FROM dbo.CommandLog;
+    BEGIN TRY EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases = N'[DBCCGovTest_R,ot]', @DaysInCycle = 1; SET @Err = NULL; END TRY
+    BEGIN CATCH SET @Err = ERROR_MESSAGE(); END CATCH
+    SELECT @Checked = COUNT(DISTINCT ObjectName) FROM dbo.CommandLog WHERE ID > @Start AND CommandType = 'DBCC_CHECKTABLE' AND DatabaseName = N'DBCCGovTest_R,ot' AND ErrorNumber = 0;
+    SELECT @Stamped = COUNT(*) FROM dbo.VLDB_CheckRotationLog WHERE DatabaseName = N'DBCCGovTest_R,ot' AND LastCheckedDate IS NOT NULL;
+    SELECT @Rows = COUNT(*) FROM dbo.CommandLog WHERE ID > @Start AND DatabaseName = N'DBCCGovTest_R,ot' AND CommandType IN ('DBCC_CHECKALLOC', 'DBCC_CHECKCATALOG') AND ErrorNumber = 0;
+    INSERT INTO #Results (TestName, Passed, Detail)
+    VALUES (N'Comma database [DBCCGovTest_R,ot]: 4 tables checked and stamped, CHECKALLOC + CHECKCATALOG logged', CASE WHEN @Err IS NULL AND @Checked = 4 AND @Stamped = 4 AND @Rows = 2 THEN 1 ELSE 0 END,
+            N'checked=' + CAST(@Checked AS NVARCHAR(10)) + N' stamped=' + CAST(@Stamped AS NVARCHAR(10)) + N' alloc+catalog=' + CAST(@Rows AS NVARCHAR(10)) + ISNULL(N' error=' + @Err, N''));
+
+    EXEC #NewRotationDb N'DBCCGovTest_Mixed', 2;
+    EXEC (N'USE [DBCCGovTest_Mixed]; CREATE TABLE dbo.[x,y] (id INT PRIMARY KEY); CREATE TABLE dbo.[p%q] (id INT PRIMARY KEY);');
+    SELECT @Start = ISNULL(MAX(ID), 0) FROM dbo.CommandLog;
+    BEGIN TRY EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases = N'DBCCGovTest_Mixed', @DaysInCycle = 1; SET @Err = NULL; END TRY
+    BEGIN CATCH SET @Err = ERROR_MESSAGE(); END CATCH
+    SELECT @Checked = COUNT(DISTINCT ObjectName) FROM dbo.CommandLog WHERE ID > @Start AND CommandType = 'DBCC_CHECKTABLE' AND DatabaseName = N'DBCCGovTest_Mixed' AND ErrorNumber = 0;
+    SELECT @Stamped = COUNT(*) FROM dbo.VLDB_CheckRotationLog WHERE DatabaseName = N'DBCCGovTest_Mixed' AND LastCheckedDate IS NOT NULL;
+    SELECT @Rows = COUNT(*) FROM dbo.CommandLog WHERE ID > @Start AND CommandType = 'DBCC_CHECKTABLE' AND DatabaseName = N'DBCCGovTest_Mixed' AND ObjectName IN (N'x,y', N'p%q') AND ErrorNumber = 0;
+    INSERT INTO #Results (TestName, Passed, Detail)
+    VALUES (N'Tables x,y and p%q in an ordinary database: all 4 tables checked and stamped', CASE WHEN @Err IS NULL AND @Checked = 4 AND @Stamped = 4 AND @Rows = 2 THEN 1 ELSE 0 END,
+            N'checked=' + CAST(@Checked AS NVARCHAR(10)) + N' stamped=' + CAST(@Stamped AS NVARCHAR(10)) + N' x,y + p%q=' + CAST(@Rows AS NVARCHAR(10)) + ISNULL(N' error=' + @Err, N''));
 END TRY
 BEGIN CATCH
     SET @Err = ERROR_MESSAGE();

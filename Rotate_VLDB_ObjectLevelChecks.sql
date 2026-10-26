@@ -63,29 +63,14 @@ BEGIN
     END
 
     ------------------------------------------------------------------
-    -- Split the database list without STRING_SPLIT, which needs this
-    -- maintenance database at compatibility level 130+. Items may be
-    -- bracket-quoted ([name]), as Run_TieredIntegrityCheck passes them.
+    -- Split the database list with dbo.DBCCGov_SplitDatabaseList
+    -- (Split_DatabaseList.sql): items may be bracket-quoted ([name], ]]
+    -- for ]), so any database name - including one with a comma - works.
     ------------------------------------------------------------------
-    DECLARE @Dbs TABLE (Position INT IDENTITY(1,1) PRIMARY KEY, DbName SYSNAME NOT NULL);
-    DECLARE @List NVARCHAR(MAX) = ISNULL(@VLDBDatabases, N'') + N',';
-
-    ;WITH Items AS (
-        SELECT CAST(1 AS BIGINT) AS StartPos, CAST(CHARINDEX(N',', @List) AS BIGINT) AS EndPos
-        UNION ALL
-        SELECT EndPos + 1, CAST(CHARINDEX(N',', @List, EndPos + 1) AS BIGINT)
-        FROM Items
-        WHERE CHARINDEX(N',', @List, EndPos + 1) > 0
-    ),
-    Trimmed AS (
-        SELECT StartPos, LTRIM(RTRIM(SUBSTRING(@List, StartPos, EndPos - StartPos))) AS Item FROM Items
-    )
-    INSERT INTO @Dbs (DbName)
-    SELECT CASE WHEN LEFT(Item, 1) = N'[' AND RIGHT(Item, 1) = N']' THEN PARSENAME(Item, 1) ELSE Item END
-    FROM Trimmed
-    WHERE Item <> N''
-    ORDER BY StartPos
-    OPTION (MAXRECURSION 0);
+    DECLARE @Dbs TABLE (Position INT PRIMARY KEY, DbName SYSNAME NOT NULL);
+    INSERT INTO @Dbs (Position, DbName)
+    SELECT Position, DatabaseName FROM dbo.DBCCGov_SplitDatabaseList(@VLDBDatabases);
+    DECLARE @DirectDb BIT, @DbStart DATETIME2, @DirectCmd NVARCHAR(MAX), @DirectRc INT, @DirectFailed INT = 0, @DSchema SYSNAME, @DTable SYSNAME;
 
     -- Work table for one database's batch: the exact same set is used both to
     -- build the @Objects list and to decide which rows to stamp afterward.
@@ -154,6 +139,11 @@ BEGIN
         ORDER BY ISNULL(LastCheckedDate, '1900-01-01') ASC, SchemaName, TableName;
         SET @BatchCount = @@ROWCOUNT;
 
+        -- DatabaseIntegrityCheck splits @Databases and @Objects on commas and matches names with LIKE, so a
+        -- name containing a comma or a % cannot be passed to it exactly. Such a database is checked entirely
+        -- through Hallengren's dbo.CommandExecute with the command text DatabaseIntegrityCheck builds (same
+        -- dbo.CommandLog rows); in other databases only such tables are, after DatabaseIntegrityCheck has run.
+        SET @DirectDb = CASE WHEN @DbName LIKE N'%,%' OR @DbName LIKE N'%[%]%' THEN 1 ELSE 0 END;
         SET @BatchTables = NULL;
         -- Hallengren's @Objects format is three-part "Database.Schema.Table". It reads
         -- each item with PARSENAME, so every part is bracket-quoted to keep names that
@@ -161,21 +151,57 @@ BEGIN
         SELECT @BatchTables = STUFF((
             SELECT ',' + QUOTENAME(@DbName) + '.' + QUOTENAME(SchemaName) + '.' + QUOTENAME(TableName)
             FROM #Batch
+            WHERE @DirectDb = 0 AND SchemaName NOT LIKE N'%,%' AND SchemaName NOT LIKE N'%[%]%' AND TableName NOT LIKE N'%,%' AND TableName NOT LIKE N'%[%]%'
             ORDER BY SchemaName, TableName
             FOR XML PATH(''), TYPE
         ).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
-        IF @BatchTables IS NOT NULL
+        IF @BatchCount > 0
         BEGIN
             SELECT @LogIdBefore = ISNULL(MAX(ID), 0) FROM dbo.CommandLog;
+            SET @DbStart = SYSDATETIME();
 
             -- Run CHECKTABLE + CHECKALLOC + CHECKCATALOG on this batch of tables (full logical check)
-            EXEC dbo.DatabaseIntegrityCheck
-                @Databases = @QuotedDb,
-                @CheckCommands = 'CHECKALLOC,CHECKCATALOG,CHECKTABLE',
-                @Objects = @BatchTables,
-                @TimeLimit = @TimeLimitSeconds,
-                @LogToTable = 'Y';
+            IF @BatchTables IS NOT NULL
+                EXEC dbo.DatabaseIntegrityCheck
+                    @Databases = @QuotedDb,
+                    @CheckCommands = 'CHECKALLOC,CHECKCATALOG,CHECKTABLE',
+                    @Objects = @BatchTables,
+                    @TimeLimit = @TimeLimitSeconds,
+                    @LogToTable = 'Y';
+
+            -- Direct path. Like @TimeLimit in DatabaseIntegrityCheck, no command starts once
+            -- @TimeLimitSeconds has passed since this database's checks began.
+            IF @DirectDb = 1 AND (@TimeLimitSeconds IS NULL OR SYSDATETIME() < DATEADD(SECOND, @TimeLimitSeconds, @DbStart))
+            BEGIN
+                SET @DirectCmd = N'DBCC CHECKALLOC (' + QUOTENAME(@DbName) + N') WITH ALL_ERRORMSGS';
+                EXEC @DirectRc = dbo.CommandExecute @DatabaseContext = N'master', @Command = @DirectCmd, @CommandType = N'DBCC_CHECKALLOC', @Mode = 1,
+                     @DatabaseName = @DbName, @LogToTable = N'Y', @Execute = N'Y';
+                IF @DirectRc <> 0 SET @DirectFailed += 1;
+            END
+            IF @DirectDb = 1 AND (@TimeLimitSeconds IS NULL OR SYSDATETIME() < DATEADD(SECOND, @TimeLimitSeconds, @DbStart))
+            BEGIN
+                SET @DirectCmd = N'DBCC CHECKCATALOG (' + QUOTENAME(@DbName) + N')';
+                EXEC @DirectRc = dbo.CommandExecute @DatabaseContext = N'master', @Command = @DirectCmd, @CommandType = N'DBCC_CHECKCATALOG', @Mode = 1,
+                     @DatabaseName = @DbName, @LogToTable = N'Y', @Execute = N'Y';
+                IF @DirectRc <> 0 SET @DirectFailed += 1;
+            END
+            DECLARE table_cursor CURSOR LOCAL FAST_FORWARD FOR
+                SELECT SchemaName, TableName FROM #Batch
+                WHERE @DirectDb = 1 OR SchemaName LIKE N'%,%' OR SchemaName LIKE N'%[%]%' OR TableName LIKE N'%,%' OR TableName LIKE N'%[%]%'
+                ORDER BY SchemaName, TableName;
+            OPEN table_cursor;
+            FETCH NEXT FROM table_cursor INTO @DSchema, @DTable;
+            WHILE @@FETCH_STATUS = 0 AND (@TimeLimitSeconds IS NULL OR SYSDATETIME() < DATEADD(SECOND, @TimeLimitSeconds, @DbStart))
+            BEGIN
+                SET @DirectCmd = N'DBCC CHECKTABLE (N''' + REPLACE(QUOTENAME(@DSchema) + N'.' + QUOTENAME(@DTable), N'''', N'''''') + N''') WITH ALL_ERRORMSGS';
+                EXEC @DirectRc = dbo.CommandExecute @DatabaseContext = @DbName, @Command = @DirectCmd, @CommandType = N'DBCC_CHECKTABLE', @Mode = 1,
+                     @DatabaseName = @DbName, @SchemaName = @DSchema, @ObjectName = @DTable, @ObjectType = N'U', @LogToTable = N'Y', @Execute = N'Y';
+                IF @DirectRc <> 0 SET @DirectFailed += 1;
+                FETCH NEXT FROM table_cursor INTO @DSchema, @DTable;
+            END
+            CLOSE table_cursor;
+            DEALLOCATE table_cursor;
 
             -- Stamp only the tables of this batch that DatabaseIntegrityCheck actually
             -- checked without error in this run (its CommandLog rows). A table skipped
@@ -207,5 +233,9 @@ BEGIN
 
     CLOSE db_cursor;
     DEALLOCATE db_cursor;
+
+    -- Fail the job step as DatabaseIntegrityCheck does when a check reported errors.
+    IF @DirectFailed > 0
+        RAISERROR('%d check(s) run directly reported errors; see dbo.CommandLog.', 16, 1, @DirectFailed);
 END
 GO

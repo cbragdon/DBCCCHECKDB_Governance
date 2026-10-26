@@ -80,6 +80,18 @@ BEGIN TRY
     INSERT INTO #Results (TestName, Passed, Detail)
     VALUES (N'No tempdb warning when @MinTempdbFreePct = 0', CASE WHEN @Rows = 0 THEN 1 ELSE 0 END, N'warning rows=' + CAST(@Rows AS NVARCHAR(10)));
 
+    -- Bracket-quoted target with a comma in its name, in a list: the data-volume check must find its files.
+    IF DB_ID(N'DBCCGovTest_a,b') IS NOT NULL
+        EXEC (N'ALTER DATABASE [DBCCGovTest_a,b] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [DBCCGovTest_a,b];');
+    EXEC (N'CREATE DATABASE [DBCCGovTest_a,b];');
+    SELECT @Start = ISNULL(MAX(ID), 0) FROM dbo.CommandLog;
+    EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases = N'[DBCCGovTest_a,b], NoSuchDatabase', @MinTempdbFreePct = 0, @MinVolumeFreePct = 100;
+    SELECT @Rows = COUNT(*) FROM dbo.CommandLog WHERE ID > @Start AND CommandType = 'HEADROOM_CHECK' AND DatabaseName = N'DBCCGovTest_a,b';
+    INSERT INTO #Results (TestName, Passed, Detail)
+    VALUES (N'Bracket-quoted target with a comma, [DBCCGovTest_a,b], resolved from a list', CASE WHEN @Rows = 1 THEN 1 ELSE 0 END,
+            N'data-volume warning rows naming it=' + CAST(@Rows AS NVARCHAR(10)));
+    EXEC (N'ALTER DATABASE [DBCCGovTest_a,b] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [DBCCGovTest_a,b];');
+
     -- Bracket-quoted target with & < > in its name: the data-volume check must find its files.
     IF DB_ID(N'DBCCGovTest_R&D<1>') IS NOT NULL
         EXEC (N'ALTER DATABASE [DBCCGovTest_R&D<1>] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [DBCCGovTest_R&D<1>];');

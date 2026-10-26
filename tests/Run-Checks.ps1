@@ -49,7 +49,7 @@ $TestsFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $M
 $RepoFolder  = Split-Path -Parent $TestsFolder
 $Installer   = Join-Path $RepoFolder 'Install-DBCCGovernanceToolkit.ps1'
 $Checks      = @(Join-Path $RepoFolder 'Tests_CoreLogic.sql') + @(Get-ChildItem (Join-Path $TestsFolder 'checks') -Filter '*.sql' | Sort-Object Name | ForEach-Object FullName)
-$Procedures  = @('Check_DiskAndTempdbHeadroom', 'Run_TieredIntegrityCheck', 'Rotate_VLDB_ObjectLevelChecks',
+$Procedures  = @('DBCCGov_SplitDatabaseList', 'Check_DiskAndTempdbHeadroom', 'Run_TieredIntegrityCheck', 'Rotate_VLDB_ObjectLevelChecks',
                  'Run_LargeTier_WeeklyFullCheck', 'Precheck_RequiredSpaceForSetup', 'Check_JobScheduleOverlap')
 
 function Invoke-Query([string]$Database, [string]$Query) {
@@ -84,7 +84,7 @@ foreach ($level in $CompatibilityLevel) {
     $list = ($Procedures | ForEach-Object { "N'$_'" }) -join ','
     $qi = Invoke-Query $MaintenanceDB "SELECT CAST(COUNT(*) AS varchar(10)) + '/' + CAST(SUM(CAST(m.uses_quoted_identifier AS int)) AS varchar(10)) FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.name IN ($list);"
     $qiText = ($qi | Select-Object -Last 1).Trim()
-    $rows += [pscustomobject]@{ Level = $label; Check = 'All 6 procedures created with QUOTED_IDENTIFIER ON'; Result = $(if ($qiText -eq '6/6') {'PASS'} else {'FAIL'}); Detail = "procedures/QI on = $qiText" }
+    $rows += [pscustomobject]@{ Level = $label; Check = 'All 7 objects created with QUOTED_IDENTIFIER ON'; Result = $(if ($qiText -eq '7/7') {'PASS'} else {'FAIL'}); Detail = "objects/QI on = $qiText" }
 
     foreach ($file in $Checks) {
         $name = [IO.Path]::GetFileName($file)

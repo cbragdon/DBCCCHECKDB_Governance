@@ -134,6 +134,7 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
 # Deployment order matters for readability/consistency with Deployment-Guide.md
 # even though CREATE OR ALTER PROCEDURE tolerates forward references.
 $ProcedureFiles = @(
+    'Split_DatabaseList.sql',             # dbo.DBCCGov_SplitDatabaseList, used by the procedures below
     'Check_DiskAndTempdbHeadroom.sql',
     'Run_TieredIntegrityCheck.sql',
     'Rotate_VLDB_ObjectLevelChecks.sql',

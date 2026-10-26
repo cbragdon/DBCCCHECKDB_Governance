@@ -99,7 +99,11 @@ BEGIN
     -- non-AG database on an AG replica) have no row and count as primary.
     -- The check is one row per database, so any number of AGs works.
     ------------------------------------------------------------------
-    DECLARE @Tiers TABLE (name SYSNAME PRIMARY KEY, SizePages BIGINT NOT NULL, SizeGB AS (SizePages * 8.0 / 1024 / 1024), IsPrimary BIT NOT NULL);
+    -- DirectCheck: DatabaseIntegrityCheck cannot carry this name exactly in @Databases - it splits the list on
+    -- commas before it reads brackets, and it matches names with LIKE, so a % would also select other
+    -- databases. Those databases are checked directly below instead, with the same strategy.
+    DECLARE @Tiers TABLE (name SYSNAME PRIMARY KEY, SizePages BIGINT NOT NULL, SizeGB AS (SizePages * 8.0 / 1024 / 1024), IsPrimary BIT NOT NULL,
+                          DirectCheck AS (CASE WHEN name LIKE N'%,%' OR name LIKE N'%[%]%' THEN 1 ELSE 0 END));
 
     ;WITH SizeCTE AS (
         SELECT
@@ -117,12 +121,6 @@ BEGIN
     INSERT INTO @Tiers (name, SizePages, IsPrimary)
     SELECT name, SizePages, IsPrimary FROM SizeCTE;
 
-    -- DatabaseIntegrityCheck splits @Databases on commas before it reads
-    -- brackets, so a name containing a comma cannot be passed to it.
-    DECLARE @CommaNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Tiers WHERE name LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
-    IF @CommaNames IS NOT NULL
-        RAISERROR('WARNING: database name(s) containing a comma cannot be passed to DatabaseIntegrityCheck and are NOT checked: %s', 10, 1, @CommaNames) WITH NOWAIT;
-
     DECLARE @SecondaryNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Tiers WHERE IsPrimary = 0 AND SizeGB < @MediumMaxGB ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
     IF @SecondaryNames IS NOT NULL
         RAISERROR('INFO: this replica is secondary for these Small/Medium-tier database(s); their full CHECKDB runs on the primary replica: %s', 10, 1, @SecondaryNames) WITH NOWAIT;
@@ -137,10 +135,10 @@ BEGIN
     -- brackets with PARSENAME).
     ------------------------------------------------------------------
     SELECT
-        @SmallDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB < @SmallMaxGB AND IsPrimary = 1 AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
-        @MediumDBs = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @SmallMaxGB  AND SizeGB < @MediumMaxGB AND IsPrimary = 1 AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
-        @LargeDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB  AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
-        @VLDBs     = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @LargeMaxGB  AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
+        @SmallDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB < @SmallMaxGB AND IsPrimary = 1 AND DirectCheck = 0 ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @MediumDBs = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @SmallMaxGB  AND SizeGB < @MediumMaxGB AND IsPrimary = 1 AND DirectCheck = 0 ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @LargeDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB  AND DirectCheck = 0 ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @VLDBs     = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @LargeMaxGB  AND DirectCheck = 0 ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
     ------------------------------------------------------------------
     -- MAXDOP tuning: reduced on Managed Instance to lower tempdb spill
@@ -218,5 +216,43 @@ BEGIN
         ELSE
             EXEC sp_executesql @SqlVLDB, @ParmsVLDB, @p_Databases = @VLDBs, @p_TimeLimit = 28800;
     END
+
+    ------------------------------------------------------------------
+    -- Databases whose name contains a comma or a % (DirectCheck = 1):
+    -- checked one at a time with the strategy of their tier, through
+    -- Hallengren's dbo.CommandExecute with the command text
+    -- DatabaseIntegrityCheck builds, so dbo.CommandLog records them in
+    -- exactly the same way. Same replica rule: Small/Medium only where
+    -- this replica is primary for the database.
+    ------------------------------------------------------------------
+    DECLARE @DirectName SYSNAME, @DirectGB DECIMAL(38,6), @DirectQuoted NVARCHAR(300), @DirectCmd NVARCHAR(MAX), @DirectRc INT, @DirectFailed INT = 0;
+    DECLARE direct_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name, SizeGB FROM @Tiers
+        WHERE DirectCheck = 1 AND (IsPrimary = 1 OR SizeGB >= @MediumMaxGB)
+        ORDER BY name;
+    OPEN direct_cursor;
+    FETCH NEXT FROM direct_cursor INTO @DirectName, @DirectGB;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @DirectQuoted = QUOTENAME(@DirectName);
+        IF @DirectGB >= @MediumMaxGB
+            EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases = @DirectQuoted;
+        SET @DirectCmd = N'DBCC CHECKDB (' + QUOTENAME(@DirectName) + N') WITH ALL_ERRORMSGS'
+            + CASE WHEN @DirectGB >= @MediumMaxGB THEN N', PHYSICAL_ONLY' ELSE N'' END
+            + CASE WHEN @SupportsMaxDop = 1 AND @DirectGB >= @LargeMaxGB  THEN N', MAXDOP = ' + CAST(@VLDBMaxDop AS NVARCHAR(10))
+                   WHEN @SupportsMaxDop = 1 AND @DirectGB >= @MediumMaxGB THEN N', MAXDOP = ' + CAST(@LargeMaxDop AS NVARCHAR(10))
+                   ELSE N'' END;
+        RAISERROR('INFO: checking [%s] directly: its name contains a comma or %%, which the @Databases list of DatabaseIntegrityCheck cannot carry exactly.', 10, 1, @DirectName) WITH NOWAIT;
+        EXEC @DirectRc = dbo.CommandExecute @DatabaseContext = N'master', @Command = @DirectCmd, @CommandType = N'DBCC_CHECKDB', @Mode = 1,
+             @DatabaseName = @DirectName, @LogToTable = N'Y', @Execute = N'Y';
+        IF @DirectRc <> 0 SET @DirectFailed += 1;
+        FETCH NEXT FROM direct_cursor INTO @DirectName, @DirectGB;
+    END
+    CLOSE direct_cursor;
+    DEALLOCATE direct_cursor;
+
+    -- Fail the job step as DatabaseIntegrityCheck does when a check reported errors.
+    IF @DirectFailed > 0
+        RAISERROR('%d database(s) checked directly reported errors; see dbo.CommandLog.', 16, 1, @DirectFailed);
 END
 GO
