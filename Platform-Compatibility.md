@@ -27,17 +27,24 @@ any compatibility level.
 
 ## Database names
 
-Lists passed to `DatabaseIntegrityCheck` are built with `QUOTENAME` and
-without XML escaping. Tested: database names containing `&`, `<`, `>` and
-`'` are checked normally, and the VLDB rotation handles schema and table
-names containing `.`, `'` and `]`. Two limits remain, both from how
-`DatabaseIntegrityCheck` reads its `@Databases` list:
+Every database is checked whatever its name. Tested: names containing `&`,
+`<`, `>`, `'`, a comma and `%`; and, in the VLDB rotation, schema and table
+names containing `.`, `'`, `]`, a comma and `%`.
 
-- A database whose name contains a **comma** cannot be passed to it. The
-  nightly and weekly procedures leave such databases out and say so in a
-  `WARNING`/`INFO` message instead of failing silently.
-- `DatabaseIntegrityCheck` matches names with `LIKE`, so a `%` in a
-  database name acts as a wildcard there.
+- Lists passed to `DatabaseIntegrityCheck` are built with `QUOTENAME` and
+  without XML escaping.
+- `DatabaseIntegrityCheck` splits its `@Databases` and `@Objects` lists on
+  commas and matches names with `LIKE`, so a name with a comma or a `%`
+  cannot be passed to it exactly (a `%` would also select other databases).
+  Such databases - and, in the rotation, such tables - are kept out of its
+  lists and checked one by one through Hallengren's `dbo.CommandExecute`,
+  with the strategy of their tier and the command text
+  `DatabaseIntegrityCheck` itself builds, so `dbo.CommandLog` records them
+  the same way. An `INFO` message names each one. The weekly check and the
+  rotation honour their time limit for these checks as well.
+- Lists the procedures accept (`@TargetDatabases`, `@VLDBDatabases`,
+  `@Databases`) take bracket-quoted items: `N'Sales, [Finance, EU], [Odd]]Name]'`
+  (`]]` for `]`). `Split_DatabaseList.sql` holds the splitter.
 
 ## Ola Hallengren's Maintenance Solution
 

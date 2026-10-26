@@ -74,6 +74,7 @@ file in this folder and what it does.
 --    :r needs SQLCMD mode in SSMS. Check_DiskAndTempdbHeadroom first: the
 --    others call it. (Or run Install-DBCCGovernanceToolkit.ps1, which deploys
 --    all six and installs Hallengren's prerequisite if it is missing.)
+:r Split_DatabaseList.sql
 :r Check_DiskAndTempdbHeadroom.sql
 :r Run_TieredIntegrityCheck.sql
 :r Rotate_VLDB_ObjectLevelChecks.sql

@@ -400,6 +400,7 @@ DROP PROCEDURE IF EXISTS dbo.Run_LargeTier_WeeklyFullCheck;
 DROP PROCEDURE IF EXISTS dbo.Check_DiskAndTempdbHeadroom;
 DROP PROCEDURE IF EXISTS dbo.Precheck_RequiredSpaceForSetup;
 DROP PROCEDURE IF EXISTS dbo.Check_JobScheduleOverlap;
+DROP FUNCTION IF EXISTS dbo.DBCCGov_SplitDatabaseList;
 DROP TABLE IF EXISTS dbo.VLDB_CheckRotationLog;
 
 -- Ola Hallengren's own procedures/objects are left untouched; remove

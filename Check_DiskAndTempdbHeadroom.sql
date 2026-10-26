@@ -310,27 +310,11 @@ BEGIN
     DECLARE @WorstDb NVARCHAR(260);
     DECLARE @WorstDbVolMountPoint NVARCHAR(260);
 
-    -- Split the comma-separated list without STRING_SPLIT, which needs the
-    -- maintenance database at compatibility level 130+. Items may be
-    -- bracket-quoted ([name]), as Run_TieredIntegrityCheck passes them.
+    -- Split the list with dbo.DBCCGov_SplitDatabaseList (Split_DatabaseList.sql): items may be
+    -- bracket-quoted ([name], ]] for ]), so any database name - including one with a comma - can be passed.
     DECLARE @Targets TABLE (DatabaseName SYSNAME NOT NULL);
-    DECLARE @List NVARCHAR(MAX) = ISNULL(@TargetDatabases, N'') + N',';
-
-    ;WITH Items AS (
-        SELECT CAST(1 AS BIGINT) AS StartPos, CAST(CHARINDEX(N',', @List) AS BIGINT) AS EndPos
-        UNION ALL
-        SELECT EndPos + 1, CAST(CHARINDEX(N',', @List, EndPos + 1) AS BIGINT)
-        FROM Items
-        WHERE CHARINDEX(N',', @List, EndPos + 1) > 0
-    ),
-    Trimmed AS (
-        SELECT LTRIM(RTRIM(SUBSTRING(@List, StartPos, EndPos - StartPos))) AS Item FROM Items
-    )
     INSERT INTO @Targets (DatabaseName)
-    SELECT CASE WHEN LEFT(Item, 1) = N'[' AND RIGHT(Item, 1) = N']' THEN PARSENAME(Item, 1) ELSE Item END
-    FROM Trimmed
-    WHERE Item <> N''
-    OPTION (MAXRECURSION 0);
+    SELECT DatabaseName FROM dbo.DBCCGov_SplitDatabaseList(@TargetDatabases);
 
     ;WITH DbVol AS (
         SELECT

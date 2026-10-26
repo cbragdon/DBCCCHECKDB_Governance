@@ -108,7 +108,8 @@ INSERT INTO @Lab (Name, TotalMB) VALUES
     (N'DBCCGovTest_Small', 64),
     (N'DBCCGovTest_R&D<1>', 64),         -- & < > in the name (were escaped by FOR XML PATH)
     (N'DBCCGovTest_O''Brien', 64),       -- apostrophe
-    (N'DBCCGovTest_a,b', 64),            -- comma: cannot be passed to DatabaseIntegrityCheck, must be skipped cleanly
+    (N'DBCCGovTest_a,b', 64),            -- comma: DatabaseIntegrityCheck cannot carry it; checked directly via CommandExecute
+    (N'DBCCGovTest_V%', 64),             -- %: must not match DBCCGovTest_VLDB through DatabaseIntegrityCheck's LIKE
     (N'DBCCGovTest_Primary', 64),        -- simulated AG primary
     (N'DBCCGovTest_Secondary', 64),      -- simulated AG secondary: no full CHECKDB here
     (N'DBCCGovTest_Edge', 256),          -- exactly on the Small/Medium boundary (0.25 GB) -> Medium
@@ -169,7 +170,8 @@ BEGIN TRY
         (N'DBCCGovTest_Small', 1, 0, NULL),
         (N'DBCCGovTest_R&D<1>', 1, 0, NULL),
         (N'DBCCGovTest_O''Brien', 1, 0, NULL),
-        (N'DBCCGovTest_a,b', 0, NULL, NULL),
+        (N'DBCCGovTest_a,b', 1, 0, NULL),
+        (N'DBCCGovTest_V%', 1, 0, NULL),
         (N'DBCCGovTest_Primary', 1, 0, NULL),
         (N'DBCCGovTest_Secondary', 0, NULL, NULL),
         (N'DBCCGovTest_Edge', 1, 0, NULL),

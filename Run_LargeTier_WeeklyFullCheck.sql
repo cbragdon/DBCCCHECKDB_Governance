@@ -84,7 +84,11 @@ BEGIN
     -- database is skipped only when this replica holds a secondary copy
     -- of it. Databases in no AG are always checked.
     ------------------------------------------------------------------
-    DECLARE @Large TABLE (name SYSNAME PRIMARY KEY, IsPrimary BIT NOT NULL);
+    -- DirectCheck: a name with a comma or a % cannot be carried exactly in DatabaseIntegrityCheck's @Databases
+    -- (comma split, LIKE matching); such databases are checked directly below with the same full CHECKDB.
+    DECLARE @Large TABLE (name SYSNAME PRIMARY KEY, IsPrimary BIT NOT NULL,
+                          DirectCheck AS (CASE WHEN name LIKE N'%,%' OR name LIKE N'%[%]%' THEN 1 ELSE 0 END));
+    DECLARE @StartTime DATETIME2 = SYSDATETIME();
 
     ;WITH SizeCTE AS (
         SELECT
@@ -103,20 +107,20 @@ BEGIN
     SELECT name, IsPrimary FROM SizeCTE
     WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB;
 
-    DECLARE @SkippedNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Large WHERE IsPrimary = 0 OR name LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    DECLARE @SkippedNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Large WHERE IsPrimary = 0 ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
     IF @SkippedNames IS NOT NULL
-        RAISERROR('INFO: skipping Large-tier database(s) that this replica is secondary for (full logical check runs on the primary; nightly PHYSICAL_ONLY still applies here), or whose name contains a comma (cannot be passed to DatabaseIntegrityCheck): %s', 10, 1, @SkippedNames) WITH NOWAIT;
+        RAISERROR('INFO: skipping Large-tier database(s) that this replica is secondary for (full logical check runs on the primary; nightly PHYSICAL_ONLY still applies here): %s', 10, 1, @SkippedNames) WITH NOWAIT;
 
     -- TYPE + .value() keeps & < > unescaped; QUOTENAME makes
     -- DatabaseIntegrityCheck read each name literally.
     SELECT @LargeDBs = STUFF((
         SELECT ',' + QUOTENAME(name) FROM @Large
-        WHERE IsPrimary = 1 AND name NOT LIKE N'%,%'
+        WHERE IsPrimary = 1 AND DirectCheck = 0
         ORDER BY name
         FOR XML PATH(''), TYPE
     ).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
-    IF @LargeDBs IS NULL
+    IF @LargeDBs IS NULL AND NOT EXISTS (SELECT 1 FROM @Large WHERE IsPrimary = 1 AND DirectCheck = 1)
     BEGIN
         DECLARE @MediumMaxGBInt INT = CAST(@MediumMaxGB AS INT);
         DECLARE @LargeMaxGBInt INT = CAST(@LargeMaxGB AS INT);
@@ -129,7 +133,8 @@ BEGIN
     -- data-volume + IFI on box product; tempdb-logical-only on MI).
     -- Non-blocking - see Check_DiskAndTempdbHeadroom.sql for rationale.
     ------------------------------------------------------------------
-    EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases = @LargeDBs;
+    IF @LargeDBs IS NOT NULL
+        EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases = @LargeDBs;
 
     ------------------------------------------------------------------
     -- Full (non-PHYSICAL_ONLY) CHECKDB, time-boxed. @MaxDop only
@@ -144,9 +149,44 @@ BEGIN
     DECLARE @Parms NVARCHAR(MAX) = N'@p_Databases NVARCHAR(MAX), @p_TimeLimit INT' +
         CASE WHEN @SupportsMaxDop = 1 THEN N', @p_MaxDop INT' ELSE N'' END;
 
-    IF @SupportsMaxDop = 1
+    IF @LargeDBs IS NOT NULL AND @SupportsMaxDop = 1
         EXEC sp_executesql @Sql, @Parms, @p_Databases = @LargeDBs, @p_TimeLimit = @TimeLimitSeconds, @p_MaxDop = @LargeMaxDop;
-    ELSE
+    ELSE IF @LargeDBs IS NOT NULL
         EXEC sp_executesql @Sql, @Parms, @p_Databases = @LargeDBs, @p_TimeLimit = @TimeLimitSeconds;
+
+    ------------------------------------------------------------------
+    -- Databases whose name contains a comma or a % (DirectCheck = 1):
+    -- the same full CHECKDB, one at a time, through Hallengren's
+    -- dbo.CommandExecute with the command text DatabaseIntegrityCheck
+    -- builds (same dbo.CommandLog rows). Like @TimeLimit there, no new
+    -- check starts once @TimeLimitSeconds has passed since this run began.
+    ------------------------------------------------------------------
+    DECLARE @DirectName SYSNAME, @DirectQuoted NVARCHAR(300), @DirectCmd NVARCHAR(MAX), @DirectRc INT, @DirectFailed INT = 0;
+    DECLARE direct_cursor CURSOR LOCAL FAST_FORWARD FOR
+        SELECT name FROM @Large WHERE IsPrimary = 1 AND DirectCheck = 1 ORDER BY name;
+    OPEN direct_cursor;
+    FETCH NEXT FROM direct_cursor INTO @DirectName;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        IF @TimeLimitSeconds IS NOT NULL AND SYSDATETIME() >= DATEADD(SECOND, @TimeLimitSeconds, @StartTime)
+        BEGIN
+            RAISERROR('INFO: @TimeLimitSeconds reached; [%s] and any later direct checks were not started.', 10, 1, @DirectName) WITH NOWAIT;
+            BREAK;
+        END
+        SET @DirectQuoted = QUOTENAME(@DirectName);
+        EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases = @DirectQuoted;
+        SET @DirectCmd = N'DBCC CHECKDB (' + QUOTENAME(@DirectName) + N') WITH ALL_ERRORMSGS'
+            + CASE WHEN @SupportsMaxDop = 1 THEN N', MAXDOP = ' + CAST(@LargeMaxDop AS NVARCHAR(10)) ELSE N'' END;
+        RAISERROR('INFO: checking [%s] directly: its name contains a comma or %%, which the @Databases list of DatabaseIntegrityCheck cannot carry exactly.', 10, 1, @DirectName) WITH NOWAIT;
+        EXEC @DirectRc = dbo.CommandExecute @DatabaseContext = N'master', @Command = @DirectCmd, @CommandType = N'DBCC_CHECKDB', @Mode = 1,
+             @DatabaseName = @DirectName, @LogToTable = N'Y', @Execute = N'Y';
+        IF @DirectRc <> 0 SET @DirectFailed += 1;
+        FETCH NEXT FROM direct_cursor INTO @DirectName;
+    END
+    CLOSE direct_cursor;
+    DEALLOCATE direct_cursor;
+
+    IF @DirectFailed > 0
+        RAISERROR('%d database(s) checked directly reported errors; see dbo.CommandLog.', 16, 1, @DirectFailed);
 END
 GO

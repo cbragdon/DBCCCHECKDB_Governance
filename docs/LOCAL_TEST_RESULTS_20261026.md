@@ -115,6 +115,27 @@ was deleted afterwards and msdb matched the snapshot.
 | `Check_JobScheduleOverlap` on the real msdb history | Nightly vs Sunday rotation: OVERLAP RISK (both start 01:00); nightly vs Wednesday Large-tier: OK, because that job ran for 0 s; rotation vs Large-tier: not paired (no shared day). |
 | Fixed script, `@VLDBDatabaseList` left as the placeholder | jobs 1 and 3 created, job 2 not, with an INFO message. |
 
+## Follow-up: database names with a comma or `%` (2026-10-26)
+
+The first round left two name limits documented instead of fixed: a database
+whose name contains a comma was skipped (with a WARNING), and a `%` acted as a
+`LIKE` wildcard inside `DatabaseIntegrityCheck`, so `[Sales%]` in the Small
+list also selected `SalesArchive` from another tier. Both are now fixed:
+
+- `Split_DatabaseList.sql` (new): a bracket-aware list splitter used by the
+  rotation, the headroom check and the precheck (10/10 unit cases, including
+  `[Finance, EU]`, `]]`, an unclosed `[`, and leading/trailing spaces).
+- Nightly and weekly procedures and the rotation keep such names out of
+  `DatabaseIntegrityCheck`'s lists and check them through
+  `dbo.CommandExecute` with the same command text and strategy.
+
+| Check | Result |
+|---|---|
+| `tests/Run-Checks.ps1`, compat 100–170 × legacy CE off/on | 100 / 100 (01: 13/13, 02: 12/12, 03: 6/6 at every level from 110) |
+| `DBCCGovTest_a,b` and `DBCCGovTest_V%` | each checked once, full CHECKDB; `DBCCGovTest_VLDB` still checked once, PHYSICAL_ONLY |
+| Rotation on `[DBCCGovTest_R,ot]` and on tables `x,y` / `p%q` | all tables checked and stamped; time limit 0 stamps nothing |
+| Planted faults (6) | 6 / 6 caught: `%` name back in Ola's list, direct loop skipped, rotation direct tables skipped (two ways), time limit ignored, splitter ignoring brackets |
+
 ## Not tested
 
 - A real availability group: roles were simulated by replacing
