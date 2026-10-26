@@ -38,7 +38,7 @@
              Rotate_VLDB_ObjectLevelChecks.sql in this same folder).
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-25
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -51,7 +51,6 @@ BEGIN
     DECLARE @MediumDBs  NVARCHAR(MAX);
     DECLARE @LargeDBs   NVARCHAR(MAX);
     DECLARE @VLDBs      NVARCHAR(MAX);
-    DECLARE @IsPrimary  BIT;
     DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
     DECLARE @IsManagedInstance BIT = CASE WHEN @EngineEdition = 8 THEN 1 ELSE 0 END;
     DECLARE @Msg NVARCHAR(500);
@@ -93,34 +92,55 @@ BEGIN
         RAISERROR('INFO: This instance (build %d.%d) predates @MaxDop support for DatabaseIntegrityCheck. Running Large/VLDB tiers without @MaxDop.', 10, 1, @ProductMajorVersion, @ProductBuild);
 
     ------------------------------------------------------------------
-    -- AlwaysOn AG role check. Returns NULL on standalone instances or
-    -- General Purpose tier Managed Instance (no AG present) -> treat as
-    -- primary so full checks are still allowed.
+    -- AlwaysOn AG role check, PER DATABASE. A database counts as primary
+    -- unless this replica holds a secondary copy of it (a local row in
+    -- sys.dm_hadr_database_replica_states with is_primary_replica = 0).
+    -- Databases in no AG (standalone instance, General Purpose MI, or a
+    -- non-AG database on an AG replica) have no row and count as primary.
+    -- The check is one row per database, so any number of AGs works.
     ------------------------------------------------------------------
-    SET @IsPrimary = ISNULL((
-        SELECT CASE WHEN primary_replica = @@SERVERNAME THEN 1 ELSE 0 END
-        FROM sys.dm_hadr_availability_group_states
-    ), 1);
+    DECLARE @Tiers TABLE (name SYSNAME PRIMARY KEY, SizePages BIGINT NOT NULL, SizeGB AS (SizePages * 8.0 / 1024 / 1024), IsPrimary BIT NOT NULL);
 
-    ------------------------------------------------------------------
-    -- Size-based tiering. Uses FOR XML PATH concatenation for
-    -- SQL Server 2016 compatibility (STRING_AGG requires 2017+).
-    ------------------------------------------------------------------
     ;WITH SizeCTE AS (
         SELECT
             d.name,
-            SUM(mf.size) * 8.0 / 1024 / 1024 AS SizeGB
+            SUM(CAST(mf.size AS BIGINT)) AS SizePages,
+            CASE WHEN EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states drs
+                              WHERE drs.database_id = d.database_id AND drs.is_local = 1 AND drs.is_primary_replica = 0)
+                 THEN 0 ELSE 1 END AS IsPrimary
         FROM sys.databases d
         JOIN sys.master_files mf ON mf.database_id = d.database_id
         WHERE d.database_id > 4      -- exclude system databases
           AND d.state = 0            -- ONLINE only
-        GROUP BY d.name
+        GROUP BY d.name, d.database_id
     )
+    INSERT INTO @Tiers (name, SizePages, IsPrimary)
+    SELECT name, SizePages, IsPrimary FROM SizeCTE;
+
+    -- DatabaseIntegrityCheck splits @Databases on commas before it reads
+    -- brackets, so a name containing a comma cannot be passed to it.
+    DECLARE @CommaNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Tiers WHERE name LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    IF @CommaNames IS NOT NULL
+        RAISERROR('WARNING: database name(s) containing a comma cannot be passed to DatabaseIntegrityCheck and are NOT checked: %s', 10, 1, @CommaNames) WITH NOWAIT;
+
+    DECLARE @SecondaryNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Tiers WHERE IsPrimary = 0 AND SizeGB < @MediumMaxGB ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    IF @SecondaryNames IS NOT NULL
+        RAISERROR('INFO: this replica is secondary for these Small/Medium-tier database(s); their full CHECKDB runs on the primary replica: %s', 10, 1, @SecondaryNames) WITH NOWAIT;
+
+    ------------------------------------------------------------------
+    -- Size-based tiering. Uses FOR XML PATH concatenation for
+    -- SQL Server 2016 compatibility (STRING_AGG requires 2017+).
+    -- TYPE + .value() returns the names unescaped (plain FOR XML PATH('')
+    -- turns & < > into &amp; &lt; &gt;, and DatabaseIntegrityCheck then
+    -- reports those databases as nonexistent). QUOTENAME makes
+    -- DatabaseIntegrityCheck read each name literally (it strips the
+    -- brackets with PARSENAME).
+    ------------------------------------------------------------------
     SELECT
-        @SmallDBs  = STUFF((SELECT ',' + name FROM SizeCTE WHERE SizeGB < @SmallMaxGB FOR XML PATH('')), 1, 1, ''),
-        @MediumDBs = STUFF((SELECT ',' + name FROM SizeCTE WHERE SizeGB >= @SmallMaxGB  AND SizeGB < @MediumMaxGB FOR XML PATH('')), 1, 1, ''),
-        @LargeDBs  = STUFF((SELECT ',' + name FROM SizeCTE WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB  FOR XML PATH('')), 1, 1, ''),
-        @VLDBs     = STUFF((SELECT ',' + name FROM SizeCTE WHERE SizeGB >= @LargeMaxGB  FOR XML PATH('')), 1, 1, '');
+        @SmallDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB < @SmallMaxGB AND IsPrimary = 1 AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @MediumDBs = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @SmallMaxGB  AND SizeGB < @MediumMaxGB AND IsPrimary = 1 AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @LargeDBs  = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB  AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, ''),
+        @VLDBs     = STUFF((SELECT ',' + QUOTENAME(name) FROM @Tiers WHERE SizeGB >= @LargeMaxGB  AND name NOT LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
     ------------------------------------------------------------------
     -- MAXDOP tuning: reduced on Managed Instance to lower tempdb spill
@@ -130,9 +150,10 @@ BEGIN
     DECLARE @VLDBMaxDop  INT = CASE WHEN @IsManagedInstance = 1 THEN 1 ELSE 2 END;
 
     ------------------------------------------------------------------
-    -- Tier 1: Small - full CHECKDB. Primary replica only.
+    -- Tier 1: Small - full CHECKDB. Primary replica only (the list
+    -- above already excludes databases this replica is secondary for).
     ------------------------------------------------------------------
-    IF @SmallDBs IS NOT NULL AND @IsPrimary = 1
+    IF @SmallDBs IS NOT NULL
         EXEC dbo.DatabaseIntegrityCheck
             @Databases = @SmallDBs,
             @CheckCommands = 'CHECKDB',
@@ -141,7 +162,7 @@ BEGIN
     ------------------------------------------------------------------
     -- Tier 2: Medium - full CHECKDB, time-boxed. Primary replica only.
     ------------------------------------------------------------------
-    IF @MediumDBs IS NOT NULL AND @IsPrimary = 1
+    IF @MediumDBs IS NOT NULL
         EXEC dbo.DatabaseIntegrityCheck
             @Databases = @MediumDBs,
             @CheckCommands = 'CHECKDB',

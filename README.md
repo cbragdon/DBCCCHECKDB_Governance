@@ -59,17 +59,26 @@ file in this folder and what it does.
    - https://github.com/olahallengren/sql-server-maintenance-solution
 2. SQL Server Agent must be enabled (default on box product and Managed Instance;
    not applicable/needed for Azure SQL Database, which this solution does not target).
+3. The maintenance database must be at **compatibility level 110 or higher**
+   (Ola Hallengren's `DatabaseIntegrityCheck` does not compile below 110).
+   `Install-DBCCGovernanceToolkit.ps1` checks this and stops cleanly for a
+   lower level. The databases being *checked* can be at any level.
 
 ## Quick Start
 
 ```sql
 -- 1. Install Ola Hallengren's MaintenanceSolution.sql first (not included here).
 
--- 2. Deploy the tiering procedures to the same database as Hallengren's scripts
---    (a DEDICATED maintenance database, e.g. [DBAdmin] or [DBA] - NEVER [master]):
+-- 2. Deploy the procedures to the same database as Hallengren's scripts
+--    (a DEDICATED maintenance database, e.g. [DBAdmin] or [DBA] - NEVER [master]).
+--    :r needs SQLCMD mode in SSMS. Check_DiskAndTempdbHeadroom first: the
+--    others call it. (Or run Install-DBCCGovernanceToolkit.ps1, which deploys
+--    all six and installs Hallengren's prerequisite if it is missing.)
+:r Check_DiskAndTempdbHeadroom.sql
 :r Run_TieredIntegrityCheck.sql
 :r Rotate_VLDB_ObjectLevelChecks.sql
 :r Run_LargeTier_WeeklyFullCheck.sql
+:r Precheck_RequiredSpaceForSetup.sql
 
 -- 3. Edit @MaintenanceDB (must not be 'master') and @VLDBDatabaseList in
 --    Deploy_SQLAgentJobs.sql if you have VLDB databases, then deploy the
@@ -93,6 +102,36 @@ EXEC dbo.Check_JobScheduleOverlap;
 --    regression test suite - no dependencies, safe on any database:
 :r Tests_CoreLogic.sql
 ```
+
+## Testing
+
+Two levels of tests, both self-checking (each prints PASS/FAIL rows and a
+`N test(s) run, N passed, 0 failed` line, and raises severity 16 on any
+failure):
+
+- `Tests_CoreLogic.sql` checks copies of the core expressions (tier
+  boundaries, materiality, overlap math). It needs nothing installed.
+- `tests/checks/*.sql` run the **installed** procedures against throwaway
+  `DBCCGovTest_*` databases: tier routing with `PHYSICAL_ONLY`/`MAXDOP`,
+  simulated availability-group roles, awkward database names (`&`, `'`,
+  `,`), the VLDB rotation (coverage, time limit, dropped tables), the
+  tempdb free-space figure, and the job-overlap verdicts including runs that
+  cross midnight. Where a real 500 GB database or real `msdb` jobs would be
+  needed, the check builds a test copy of the installed procedure with a few
+  counted text edits (scaled tier sizes, test tables) and runs that.
+
+`tests/Run-Checks.ps1` runs all of them on a test instance: it creates a
+disposable maintenance database at each compatibility level you give it,
+installs the toolkit with the installer, runs every check, and drops it
+again:
+
+```powershell
+.\tests\Run-Checks.ps1 -ServerName localhost -CompatibilityLevel 100,110,120,130,140,150,160,170
+.\tests\Run-Checks.ps1 -ServerName localhost -CompatibilityLevel 100,110,120,130,140,150,160,170 -LegacyCardinalityEstimation
+```
+
+The latest results are in
+[`docs/LOCAL_TEST_RESULTS_20261026.md`](docs/LOCAL_TEST_RESULTS_20261026.md).
 
 See `Deployment-Guide.md` for full details, and `Tiering-Strategy.md` /
 `Platform-Compatibility.md` for the reasoning behind the design decisions.

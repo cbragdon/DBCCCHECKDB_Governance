@@ -28,7 +28,7 @@
  must also be deployed to the same database first.
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-25
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -39,7 +39,6 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @LargeDBs NVARCHAR(MAX);
-    DECLARE @IsPrimary BIT;
     DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
     DECLARE @IsManagedInstance BIT = CASE WHEN @EngineEdition = 8 THEN 1 ELSE 0 END;
 
@@ -57,23 +56,6 @@ BEGIN
     ------------------------------------------------------------------
     DECLARE @MediumMaxGB DECIMAL(18,2) = 500;
     DECLARE @LargeMaxGB  DECIMAL(18,2) = 2048;   -- 2 TB
-
-    ------------------------------------------------------------------
-    -- Full logical CHECKDB requires primary-replica-equivalent access;
-    -- it is not reliable against read-intent-only AG secondaries. Runs
-    -- only on primary (or standalone/no-AG instances, where the role
-    -- check returns NULL and is treated as primary).
-    ------------------------------------------------------------------
-    SET @IsPrimary = ISNULL((
-        SELECT CASE WHEN primary_replica = @@SERVERNAME THEN 1 ELSE 0 END
-        FROM sys.dm_hadr_availability_group_states
-    ), 1);
-
-    IF @IsPrimary = 0
-    BEGIN
-        RAISERROR('INFO: This replica is not primary. Skipping weekly full logical check (requires primary-equivalent access). Nightly PHYSICAL_ONLY checks still apply on this replica via Run_TieredIntegrityCheck.', 10, 1);
-        RETURN;
-    END
 
     ------------------------------------------------------------------
     -- Build @MaxDop support detection identical to Run_TieredIntegrityCheck.sql
@@ -95,28 +77,50 @@ BEGIN
     ------------------------------------------------------------------
     -- Identify Large-tier databases only (same boundaries as the
     -- nightly proc). VLDB (>= @LargeMaxGB) is deliberately excluded.
+    --
+    -- Full logical CHECKDB requires primary-replica-equivalent access;
+    -- it is not reliable against read-intent-only AG secondaries. The
+    -- role is checked PER DATABASE, as in Run_TieredIntegrityCheck: a
+    -- database is skipped only when this replica holds a secondary copy
+    -- of it. Databases in no AG are always checked.
     ------------------------------------------------------------------
+    DECLARE @Large TABLE (name SYSNAME PRIMARY KEY, IsPrimary BIT NOT NULL);
+
     ;WITH SizeCTE AS (
         SELECT
             d.name,
-            SUM(mf.size) * 8.0 / 1024 / 1024 AS SizeGB
+            SUM(CAST(mf.size AS BIGINT)) * 8.0 / 1024 / 1024 AS SizeGB,
+            CASE WHEN EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states drs
+                              WHERE drs.database_id = d.database_id AND drs.is_local = 1 AND drs.is_primary_replica = 0)
+                 THEN 0 ELSE 1 END AS IsPrimary
         FROM sys.databases d
         JOIN sys.master_files mf ON mf.database_id = d.database_id
         WHERE d.database_id > 4
           AND d.state = 0
-        GROUP BY d.name
+        GROUP BY d.name, d.database_id
     )
+    INSERT INTO @Large (name, IsPrimary)
+    SELECT name, IsPrimary FROM SizeCTE
+    WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB;
+
+    DECLARE @SkippedNames NVARCHAR(MAX) = STUFF((SELECT ', ' + QUOTENAME(name) FROM @Large WHERE IsPrimary = 0 OR name LIKE N'%,%' ORDER BY name FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');
+    IF @SkippedNames IS NOT NULL
+        RAISERROR('INFO: skipping Large-tier database(s) that this replica is secondary for (full logical check runs on the primary; nightly PHYSICAL_ONLY still applies here), or whose name contains a comma (cannot be passed to DatabaseIntegrityCheck): %s', 10, 1, @SkippedNames) WITH NOWAIT;
+
+    -- TYPE + .value() keeps & < > unescaped; QUOTENAME makes
+    -- DatabaseIntegrityCheck read each name literally.
     SELECT @LargeDBs = STUFF((
-        SELECT ',' + name FROM SizeCTE
-        WHERE SizeGB >= @MediumMaxGB AND SizeGB < @LargeMaxGB
-        FOR XML PATH('')
-    ), 1, 1, '');
+        SELECT ',' + QUOTENAME(name) FROM @Large
+        WHERE IsPrimary = 1 AND name NOT LIKE N'%,%'
+        ORDER BY name
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 1, '');
 
     IF @LargeDBs IS NULL
     BEGIN
         DECLARE @MediumMaxGBInt INT = CAST(@MediumMaxGB AS INT);
         DECLARE @LargeMaxGBInt INT = CAST(@LargeMaxGB AS INT);
-        RAISERROR('INFO: No databases currently fall in the Large tier (%d GB - %d GB). Nothing to do.', 10, 1, @MediumMaxGBInt, @LargeMaxGBInt);
+        RAISERROR('INFO: No databases to check in the Large tier (%d GB - %d GB) on this replica. Nothing to do.', 10, 1, @MediumMaxGBInt, @LargeMaxGBInt);
         RETURN;
     END
 

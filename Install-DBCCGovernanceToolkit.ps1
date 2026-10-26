@@ -90,7 +90,7 @@
    Windows, which silently corrupts them (see Deployment-Guide.md Step 2).
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-26
+ Updated: 2026-10-26
 ================================================================================
 #>
 
@@ -107,8 +107,10 @@ param(
     # CSV row supplies its own MaintenanceDB value.
     [string] $MaintenanceDB = 'DBAdmin',
 
-    # Folder containing the .sql files. Defaults to this script's own folder.
-    [string] $ScriptFolder = $PSScriptRoot,
+    # Folder containing the .sql files. Defaults to this script's own folder
+    # (resolved below: Windows PowerShell 5.1 leaves $PSScriptRoot empty in a
+    # param() default when the script uses [CmdletBinding()]).
+    [string] $ScriptFolder,
 
     # Disable auto-installing Ola Hallengren's prerequisite scripts when
     # missing - revert to failing the target with a clear error instead.
@@ -116,6 +118,14 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+if (-not $ScriptFolder) {
+    $ScriptFolder = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+}
+
+# Lowest maintenance-database compatibility level the toolkit runs at:
+# Ola Hallengren's DatabaseIntegrityCheck does not compile below 110.
+$MinCompatibilityLevel = 110
 
 if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     throw "sqlcmd was not found on PATH. Install the SQL Server command-line tools first."
@@ -208,6 +218,14 @@ $results = @(foreach ($target in $targets) {
         } else {
             # Prerequisite check: Ola Hallengren's DatabaseIntegrityCheck must
             # already exist in the target maintenance database.
+            # Compatibility gate: below $MinCompatibilityLevel the vendor
+            # prerequisite cannot be installed, so stop this target cleanly.
+            $compatArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-h', '-1', '-W',
+                '-Q', "SET NOCOUNT ON; SELECT 'COMPAT=' + CAST(compatibility_level AS varchar(5)) FROM sys.databases WHERE database_id = DB_ID();")
+            $compatOutput = & sqlcmd @compatArgs 2>&1
+            $compatLevel = if (($compatOutput -join "`n") -match 'COMPAT=(\d+)') { [int]$Matches[1] } else { $null }
+            $compatTooLow = ($null -ne $compatLevel -and $compatLevel -lt $MinCompatibilityLevel)
+
             $prereqArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-h', '-1', '-W',
                 '-Q', "SET NOCOUNT ON; IF OBJECT_ID('dbo.DatabaseIntegrityCheck','P') IS NULL BEGIN RAISERROR('MISSING_PREREQ',16,1); END ELSE PRINT 'PREREQ_OK';")
 
@@ -215,13 +233,15 @@ $results = @(foreach ($target in $targets) {
             $prereqExit = $LASTEXITCODE
             $prereqMissing = ($prereqExit -ne 0 -or ($prereqOutput -join "`n") -notmatch 'PREREQ_OK')
 
-            if ($prereqMissing -and -not $SkipHallengrenAutoInstall) {
+            if ($compatTooLow) {
+                Write-Host "  [FAIL] [$db] is at compatibility level $compatLevel. The toolkit needs $MinCompatibilityLevel or higher (Ola Hallengren's DatabaseIntegrityCheck does not compile below it). Raise the level of the maintenance database, or choose another one. Nothing was deployed." -ForegroundColor Red
+            } elseif ($prereqMissing -and -not $SkipHallengrenAutoInstall) {
                 Write-Host "  [INFO] Prerequisite not found in [$db] - auto-installing Ola Hallengren's Maintenance Solution (CommandLog, CommandExecute, DatabaseIntegrityCheck) from the bundled vendor copy..." -ForegroundColor Yellow
 
                 $hallengrenInstallFailed = $false
                 foreach ($hfile in $HallengrenFiles) {
                     $hFullPath = Join-Path $HallengrenVendorFolder $hfile
-                    $hArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-i', $hFullPath)
+                    $hArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-I', '-i', $hFullPath)
                     $hOutput = & sqlcmd @hArgs 2>&1
                     $hExit = $LASTEXITCODE
 
@@ -247,7 +267,9 @@ $results = @(foreach ($target in $targets) {
                 }
             }
 
-            if ($prereqMissing) {
+            if ($compatTooLow) {
+                $status = "FAILED - maintenance database compatibility level $compatLevel (needs $MinCompatibilityLevel or higher)"
+            } elseif ($prereqMissing) {
                 $status = 'FAILED - prerequisite missing or connection failed'
                 Write-Host "  [FAIL] Prerequisite check: Ola Hallengren's DatabaseIntegrityCheck not found in [$db] (or could not connect)." -ForegroundColor Red
                 if ($SkipHallengrenAutoInstall) {
@@ -264,7 +286,8 @@ $results = @(foreach ($target in $targets) {
 
                 foreach ($file in $ProcedureFiles) {
                     $fullPath = Join-Path $ScriptFolder $file
-                    $deployArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-i', $fullPath)
+                    # -I: create the procedures with QUOTED_IDENTIFIER ON (sqlcmd's default is OFF).
+                    $deployArgs = $authArgs + @('-S', $server, '-d', $db, '-f', '65001', '-b', '-I', '-i', $fullPath)
 
                     $deployOutput = & sqlcmd @deployArgs 2>&1
                     $deployExit = $LASTEXITCODE

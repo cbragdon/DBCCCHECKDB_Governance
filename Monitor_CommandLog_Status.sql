@@ -45,8 +45,15 @@
    condition preceding a CHECKDB run is visible here too, not just in
    SQL Agent job step history.
 
+   A third result set reports the VLDB rotation's object-level checks
+   (DBCC_CHECKTABLE / DBCC_CHECKALLOC / DBCC_CHECKCATALOG rows written by
+   Rotate_VLDB_ObjectLevelChecks) from the last 14 days that did NOT
+   succeed - Failed, Running, or Interrupted - classified with the same
+   rules as above. An empty third result set means every rotation check
+   in that window succeeded.
+
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-26
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -132,4 +139,30 @@ SELECT TOP (40)
     Message = ErrorMessage
 FROM dbo.CommandLog
 WHERE CommandType = 'HEADROOM_CHECK'
+ORDER BY StartTime DESC;
+
+------------------------------------------------------------------
+-- VLDB rotation object-level checks (Rotate_VLDB_ObjectLevelChecks.sql)
+-- from the last 14 days that did not succeed. Same four-state rules as
+-- the first result set.
+------------------------------------------------------------------
+SELECT
+    DatabaseName,
+    SchemaName,
+    ObjectName,
+    CommandType,
+    StartTime,
+    EndTime,
+    ErrorNumber,
+    Status = CASE
+        WHEN EndTime IS NOT NULL AND ErrorNumber <> 0 THEN 'Failed'
+        WHEN EndTime IS NULL AND ErrorNumber IS NULL AND StartTime >= @ServerStartTime THEN 'Running'
+        WHEN EndTime IS NULL AND ErrorNumber IS NULL AND StartTime < @ServerStartTime THEN 'Interrupted (Server Restarted)'
+        ELSE 'Unknown'
+    END,
+    ErrorMessage
+FROM dbo.CommandLog
+WHERE CommandType IN ('DBCC_CHECKTABLE', 'DBCC_CHECKALLOC', 'DBCC_CHECKCATALOG')
+  AND StartTime >= DATEADD(DAY, -14, SYSDATETIME())
+  AND NOT (EndTime IS NOT NULL AND ErrorNumber = 0)
 ORDER BY StartTime DESC;

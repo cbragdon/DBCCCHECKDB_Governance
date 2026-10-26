@@ -19,6 +19,10 @@
    changes one of those expressions without updating the matching test here,
    that's a signal the change needs a second look.
 
+   Because these are copies, this suite cannot notice a change to the
+   procedures themselves. The self-checking scripts in tests/checks/ run
+   the INSTALLED procedures (see README.md, "Testing").
+
    Covers:
      1. Run_TieredIntegrityCheck.sql   - Small/Medium/Large/VLDB size tiering boundaries
      2. Precheck_RequiredSpaceForSetup.sql - IsShortfallMaterial threshold logic

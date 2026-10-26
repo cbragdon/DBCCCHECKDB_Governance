@@ -86,7 +86,7 @@
    -- to DatabaseIntegrityCheck's @Databases parameter for that tier/run.
 
  Author:  Generated with GitHub Copilot CLI assistance
- Updated: 2026-09-26
+ Updated: 2026-10-26
 ================================================================================
 */
 
@@ -138,11 +138,13 @@ BEGIN
     ------------------------------------------------------------------
     DECLARE @TempdbFreeMB DECIMAL(18,2), @TempdbFreePct DECIMAL(5,2), @TempdbTotalMB DECIMAL(18,2);
 
+    -- Free = unallocated extents in tempdb's DATA files; total = those same
+    -- data files' current size. Both come from the same DMV, so the log file
+    -- is in neither figure.
     SELECT
-        @TempdbTotalMB = SUM(size) * 8.0 / 1024,
-        @TempdbFreeMB  = SUM(CASE WHEN type = 0 THEN size ELSE 0 END) * 8.0 / 1024
-            - (SELECT SUM(unallocated_extent_page_count) * 8.0 / 1024 FROM tempdb.sys.dm_db_file_space_usage)
-    FROM tempdb.sys.database_files;
+        @TempdbTotalMB = SUM(total_page_count) * 8.0 / 1024,
+        @TempdbFreeMB  = SUM(unallocated_extent_page_count) * 8.0 / 1024
+    FROM tempdb.sys.dm_db_file_space_usage;
 
     SET @TempdbFreePct = CASE WHEN @TempdbTotalMB > 0 THEN (@TempdbFreeMB / @TempdbTotalMB) * 100 ELSE 0 END;
 
@@ -308,13 +310,35 @@ BEGIN
     DECLARE @WorstDb NVARCHAR(260);
     DECLARE @WorstDbVolMountPoint NVARCHAR(260);
 
+    -- Split the comma-separated list without STRING_SPLIT, which needs the
+    -- maintenance database at compatibility level 130+. Items may be
+    -- bracket-quoted ([name]), as Run_TieredIntegrityCheck passes them.
+    DECLARE @Targets TABLE (DatabaseName SYSNAME NOT NULL);
+    DECLARE @List NVARCHAR(MAX) = ISNULL(@TargetDatabases, N'') + N',';
+
+    ;WITH Items AS (
+        SELECT CAST(1 AS BIGINT) AS StartPos, CAST(CHARINDEX(N',', @List) AS BIGINT) AS EndPos
+        UNION ALL
+        SELECT EndPos + 1, CAST(CHARINDEX(N',', @List, EndPos + 1) AS BIGINT)
+        FROM Items
+        WHERE CHARINDEX(N',', @List, EndPos + 1) > 0
+    ),
+    Trimmed AS (
+        SELECT LTRIM(RTRIM(SUBSTRING(@List, StartPos, EndPos - StartPos))) AS Item FROM Items
+    )
+    INSERT INTO @Targets (DatabaseName)
+    SELECT CASE WHEN LEFT(Item, 1) = N'[' AND RIGHT(Item, 1) = N']' THEN PARSENAME(Item, 1) ELSE Item END
+    FROM Trimmed
+    WHERE Item <> N''
+    OPTION (MAXRECURSION 0);
+
     ;WITH DbVol AS (
         SELECT
             d.name AS DatabaseName,
             vs.volume_mount_point,
             vs.available_bytes * 100.0 / NULLIF(vs.total_bytes, 0) AS FreePct
-        FROM STRING_SPLIT(@TargetDatabases, ',') s
-        JOIN sys.databases d ON d.name = LTRIM(RTRIM(s.value))
+        FROM @Targets s
+        JOIN sys.databases d ON d.name = s.DatabaseName
         JOIN sys.master_files mf ON mf.database_id = d.database_id AND mf.type = 0   -- data files only
         CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
     )
