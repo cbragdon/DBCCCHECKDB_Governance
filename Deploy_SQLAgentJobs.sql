@@ -98,7 +98,7 @@ GO
 ------------------------------------------------------------------
 DECLARE @MaintenanceDB SYSNAME = N'YourMaintenanceDB';  -- EDIT ME - e.g. 'DBAdmin' - MUST NOT be 'master'
 DECLARE @JobOwner SYSNAME = N'sa';
-DECLARE @VLDBDatabaseList NVARCHAR(MAX) = N'YourVLDBDatabase1,YourVLDBDatabase2'; -- EDIT ME (comma-separated)
+DECLARE @VLDBDatabaseList NVARCHAR(MAX) = N'YourVLDBDatabase1,YourVLDBDatabase2'; -- EDIT ME (comma-separated; write a name that contains a comma as [Name, X], ]] for ])
 
 IF @MaintenanceDB = N'YourMaintenanceDB' OR @MaintenanceDB = N'master'
 BEGIN
