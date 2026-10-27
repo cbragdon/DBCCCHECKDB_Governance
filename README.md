@@ -149,6 +149,10 @@ See `Deployment-Guide.md` for full details, and `Tiering-Strategy.md` /
   `MaintenanceSolutionAzureSQLDatabase.sql` instead; the procs in this folder
   intentionally reject that platform (`EngineEdition = 5`).
 
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for what to include in a report, the tests a change must pass, and the rules every change keeps.
+
 ## License
 
 [MIT](LICENSE). The vendored Ola Hallengren Maintenance Solution files in
