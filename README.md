@@ -148,3 +148,9 @@ See `Deployment-Guide.md` for full details, and `Tiering-Strategy.md` /
 - Azure SQL Database (single-database PaaS) — use Hallengren's
   `MaintenanceSolutionAzureSQLDatabase.sql` instead; the procs in this folder
   intentionally reject that platform (`EngineEdition = 5`).
+
+## License
+
+[MIT](LICENSE). The vendored Ola Hallengren Maintenance Solution files in
+`vendor/OlaHallengrenMaintenanceSolution/` are covered by their own MIT license,
+reproduced in that folder's [README](vendor/OlaHallengrenMaintenanceSolution/README.md).
