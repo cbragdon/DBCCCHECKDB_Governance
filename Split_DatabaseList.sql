@@ -12,7 +12,11 @@
      N'Sales, [R&D], [Finance, EU], [Odd]]Name]'
        -> Sales | R&D | Finance, EU | Odd]Name
    Unquoted items are trimmed; quoted items are taken exactly. Empty items
-   are skipped. Position keeps the order of the list.
+   are skipped. Position keeps the order of the list. IsMalformed marks any
+   quoted item with non-whitespace characters after its closing bracket;
+   callers must reject the full list before acting on database names.
+   An unclosed bracketed item is also marked malformed, rather than silently
+   treated as a literal name (write [[name] for a name beginning with [).
 
    A multi-statement function with a character loop (no STRING_SPLIT,
    OPENJSON or XML), so it works in a maintenance database at any
@@ -26,11 +30,11 @@
 */
 
 CREATE OR ALTER FUNCTION dbo.DBCCGov_SplitDatabaseList (@List NVARCHAR(MAX))
-RETURNS @Items TABLE (Position INT IDENTITY(1,1) PRIMARY KEY, DatabaseName SYSNAME NOT NULL)
+RETURNS @Items TABLE (Position INT IDENTITY(1,1) PRIMARY KEY, DatabaseName SYSNAME NOT NULL, IsMalformed BIT NOT NULL)
 AS
 BEGIN
     DECLARE @i BIGINT = 1, @len BIGINT = LEN(ISNULL(@List, N'') + N'x') - 1;   -- + 'x' keeps trailing spaces in the count
-    DECLARE @ch NCHAR(1), @item NVARCHAR(MAX) = N'', @inBracket BIT = 0, @quoted BIT = 0, @openAt BIGINT = 0, @literalAt BIGINT = 0;
+    DECLARE @ch NCHAR(1), @item NVARCHAR(MAX) = N'', @inBracket BIT = 0, @quoted BIT = 0, @openAt BIGINT = 0, @literalAt BIGINT = 0, @malformed BIT = 0;
 
     WHILE @i <= @len + 1
     BEGIN
@@ -42,9 +46,9 @@ BEGIN
             ELSE IF @ch = N']' AND @i <= @len
                 SET @inBracket = 0;                            -- end of the quoted name
             ELSE IF @i > @len
-                -- Unclosed [: it was not a quote after all. Read again from just after it, with the [ as an
-                -- ordinary character, so the commas inside still separate names.
-                SELECT @item = N'[', @inBracket = 0, @quoted = 0, @literalAt = @openAt, @i = @openAt;
+                -- Unclosed bracket: preserve the original token for diagnostics but mark it invalid.
+                -- Read again from just after [ as literal text so the loop terminates.
+                SELECT @item = N'[', @inBracket = 0, @quoted = 0, @literalAt = @openAt, @i = @openAt, @malformed = 1;
             ELSE
                 SET @item += @ch;
         END
@@ -53,11 +57,18 @@ BEGIN
         ELSE IF @ch = N','
         BEGIN
             IF @quoted = 0 SET @item = LTRIM(RTRIM(@item));
-            IF @item <> N'' INSERT INTO @Items (DatabaseName) VALUES (@item);
-            SELECT @item = N'', @quoted = 0;
+            -- SYSNAME is limited to 128 UTF-16 code units. With ANSI_WARNINGS OFF,
+            -- an implicit conversion can silently select a different, truncated name.
+            -- Preserve the diagnostic prefix only after marking the item invalid.
+            IF DATALENGTH(@item) > 256
+                SELECT @malformed = 1, @item = CONVERT(nvarchar(128), @item);
+            IF @item <> N'' OR @malformed = 1 INSERT INTO @Items (DatabaseName, IsMalformed) VALUES (@item, @malformed);
+            SELECT @item = N'', @quoted = 0, @malformed = 0;
         END
         ELSE IF @quoted = 0
-            SET @item += @ch;                                  -- text after a closing bracket (spaces) is ignored
+            SET @item += @ch;
+        ELSE IF @ch NOT IN (N' ', NCHAR(9), NCHAR(10), NCHAR(13))
+            SET @malformed = 1;   -- non-whitespace after ] must not silently resolve to another database
         SET @i += 1;
     END
     RETURN;

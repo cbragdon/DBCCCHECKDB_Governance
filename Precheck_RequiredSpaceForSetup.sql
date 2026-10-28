@@ -220,6 +220,8 @@ BEGIN
 
     -- Split @Databases with dbo.DBCCGov_SplitDatabaseList (Split_DatabaseList.sql): items may be
     -- bracket-quoted ([name], ]] for ]), so any database name - including one with a comma - can be passed.
+    IF EXISTS (SELECT 1 FROM dbo.DBCCGov_SplitDatabaseList(@Databases) WHERE IsMalformed = 1)
+        THROW 50190, 'Database list contains an overlength or malformed bracket-quoted name.', 1;
     DECLARE @Selected TABLE (DatabaseName SYSNAME NOT NULL);
     INSERT INTO @Selected (DatabaseName)
     SELECT DatabaseName FROM dbo.DBCCGov_SplitDatabaseList(@Databases);

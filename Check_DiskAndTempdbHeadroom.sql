@@ -100,6 +100,10 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
+    -- Validate the entire list before diagnostics can emit warnings or CommandLog rows.
+    IF EXISTS (SELECT 1 FROM dbo.DBCCGov_SplitDatabaseList(@TargetDatabases) WHERE IsMalformed = 1)
+        THROW 50190, 'Database list contains an overlength or malformed bracket-quoted name.', 1;
+
     DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
     DECLARE @IsManagedInstance BIT = CASE WHEN @EngineEdition = 8 THEN 1 ELSE 0 END;
     DECLARE @Msg NVARCHAR(1000);
