@@ -60,6 +60,8 @@ END CATCH;
 INSERT @Results VALUES(N'Rotation rejects malformed quoted database',@Pass);
 SELECT TestName, CASE WHEN Passed=1 THEN N'PASS' ELSE N'FAIL' END AS Result
 FROM @Results ORDER BY TestName;
-IF EXISTS(SELECT 1 FROM @Results WHERE Passed=0)
+DECLARE @Total int=(SELECT COUNT(*) FROM @Results), @Failed int=(SELECT COUNT(*) FROM @Results WHERE Passed=0);
+PRINT '05_NameList_Validation: ' + CAST(@Total AS varchar(10)) + ' test(s) run, '
+    + CAST(@Total-@Failed AS varchar(10)) + ' passed, ' + CAST(@Failed AS varchar(10)) + ' failed';
+IF @Failed > 0 OR @Total=0
   THROW 50191,'Quoted database-list regression assertions failed.',1;
-PRINT '05_NameList_Validation: all checks PASS';
