@@ -9,6 +9,9 @@ DECLARE @Cases TABLE (Input nvarchar(300) NOT NULL, ExpectedName sysname NULL, E
 INSERT @Cases(Input,ExpectedName,ExpectedMalformed) VALUES
 (N'[master]x', N'master', 1),
 (N'[master] extra', N'master', 1),
+(N'[master', N'[master', 1),
+(N'[master]]', N'[master]]', 1),
+(N'[]x', N'', 1),
 (N'[master]   ', N'master', 0),
 (N'[Odd]]Name]', N'Odd]Name', 0),
 (N'[Finance, EU]', N'Finance, EU', 0),
@@ -20,7 +23,8 @@ SELECT c.Input,
      AND MAX(f.DatabaseName)=c.ExpectedName THEN 1 ELSE 0 END)
 FROM @Cases AS c OUTER APPLY dbo.DBCCGov_SplitDatabaseList(c.Input) AS f
 GROUP BY c.Input,c.ExpectedName,c.ExpectedMalformed;
-DECLARE @Err int, @Pass bit;
+DECLARE @Err int, @Pass bit, @CommandLogBefore int;
+SELECT @CommandLogBefore=ISNULL(MAX(ID),0) FROM dbo.CommandLog;
 BEGIN TRY
   EXEC dbo.Precheck_RequiredSpaceForSetup @Databases=N'[master]suffix';
   SET @Pass=0;
@@ -32,7 +36,7 @@ END CATCH;
 INSERT @Results VALUES(N'Precheck rejects malformed quoted database',@Pass);
 SET @Err=NULL;
 BEGIN TRY
-  EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases=N'[master]suffix';
+  EXEC dbo.Check_DiskAndTempdbHeadroom @TargetDatabases=N'[master]suffix', @MinTempdbFreePct=100;
   SET @Pass=0;
 END TRY
 BEGIN CATCH
@@ -40,6 +44,10 @@ BEGIN CATCH
   SET @Pass=CASE WHEN @Err=50190 THEN 1 ELSE 0 END;
 END CATCH;
 INSERT @Results VALUES(N'Headroom rejects malformed quoted database',@Pass);
+INSERT @Results
+SELECT N'Headroom rejects before emitting CommandLog rows',
+       CONVERT(bit,CASE WHEN NOT EXISTS (SELECT 1 FROM dbo.CommandLog WHERE ID > @CommandLogBefore)
+                            THEN 1 ELSE 0 END);
 SET @Err=NULL;
 BEGIN TRY
   EXEC dbo.Rotate_VLDB_ObjectLevelChecks @VLDBDatabases=N'[master]suffix';
