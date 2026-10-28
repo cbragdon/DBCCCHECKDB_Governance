@@ -15,6 +15,8 @@
    are skipped. Position keeps the order of the list. IsMalformed marks any
    quoted item with non-whitespace characters after its closing bracket;
    callers must reject the full list before acting on database names.
+   An unclosed bracketed item is also marked malformed, rather than silently
+   treated as a literal name (write [[name] for a name beginning with [).
 
    A multi-statement function with a character loop (no STRING_SPLIT,
    OPENJSON or XML), so it works in a maintenance database at any
@@ -44,9 +46,9 @@ BEGIN
             ELSE IF @ch = N']' AND @i <= @len
                 SET @inBracket = 0;                            -- end of the quoted name
             ELSE IF @i > @len
-                -- Unclosed [: it was not a quote after all. Read again from just after it, with the [ as an
-                -- ordinary character, so the commas inside still separate names.
-                SELECT @item = N'[', @inBracket = 0, @quoted = 0, @literalAt = @openAt, @i = @openAt;
+                -- Unclosed bracket: preserve the original token for diagnostics but mark it invalid.
+                -- Read again from just after [ as literal text so the loop terminates.
+                SELECT @item = N'[', @inBracket = 0, @quoted = 0, @literalAt = @openAt, @i = @openAt, @malformed = 1;
             ELSE
                 SET @item += @ch;
         END
