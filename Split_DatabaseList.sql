@@ -55,7 +55,7 @@ BEGIN
         ELSE IF @ch = N','
         BEGIN
             IF @quoted = 0 SET @item = LTRIM(RTRIM(@item));
-            IF @item <> N'' INSERT INTO @Items (DatabaseName, IsMalformed) VALUES (@item, @malformed);
+            IF @item <> N'' OR @malformed = 1 INSERT INTO @Items (DatabaseName, IsMalformed) VALUES (@item, @malformed);
             SELECT @item = N'', @quoted = 0, @malformed = 0;
         END
         ELSE IF @quoted = 0
