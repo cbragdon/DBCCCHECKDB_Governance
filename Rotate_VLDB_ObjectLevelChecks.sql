@@ -68,7 +68,7 @@ BEGIN
     -- for ]), so any database name - including one with a comma - works.
     ------------------------------------------------------------------
     IF EXISTS (SELECT 1 FROM dbo.DBCCGov_SplitDatabaseList(@VLDBDatabases) WHERE IsMalformed = 1)
-        THROW 50190, 'Malformed bracketed database name: only whitespace may follow the closing bracket.', 1;
+        THROW 50190, 'Database list contains an overlength or malformed bracket-quoted name.', 1;
     DECLARE @Dbs TABLE (Position INT PRIMARY KEY, DbName SYSNAME NOT NULL);
     INSERT INTO @Dbs (Position, DbName)
     SELECT Position, DatabaseName FROM dbo.DBCCGov_SplitDatabaseList(@VLDBDatabases);

@@ -57,6 +57,11 @@ BEGIN
         ELSE IF @ch = N','
         BEGIN
             IF @quoted = 0 SET @item = LTRIM(RTRIM(@item));
+            -- SYSNAME is limited to 128 UTF-16 code units. With ANSI_WARNINGS OFF,
+            -- an implicit conversion can silently select a different, truncated name.
+            -- Preserve the diagnostic prefix only after marking the item invalid.
+            IF DATALENGTH(@item) > 256
+                SELECT @malformed = 1, @item = CONVERT(nvarchar(128), @item);
             IF @item <> N'' OR @malformed = 1 INSERT INTO @Items (DatabaseName, IsMalformed) VALUES (@item, @malformed);
             SELECT @item = N'', @quoted = 0, @malformed = 0;
         END

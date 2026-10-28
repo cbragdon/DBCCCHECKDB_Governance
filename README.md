@@ -120,7 +120,10 @@ failure):
   cross midnight. `05_NameList_Validation.sql` additionally verifies that the
   database-list splitter handles quoted names and flags malformed input,
   and that its callers reject malformed lists with error 50190 before work
-  begins. In particular `[master]suffix` and an unclosed `[master` are invalid;
+  begins. `06_NameLength_Validation.sql` covers decoded names at the 128-character
+  boundary, rejects overlength input with `ANSI_WARNINGS` ON and OFF, and proves
+  invalid input cannot register a truncated database name or write CommandLog.
+  All list consumers reject these items with error 50190. In particular `[master]suffix` and an unclosed `[master` are invalid;
   `[master]   ` and `[Odd]]Name]` are valid. Where a real 500 GB database or real `msdb` jobs would be
   needed, the check builds a test copy of the installed procedure with a few
   counted text edits (scaled tier sizes, test tables) and runs that.
