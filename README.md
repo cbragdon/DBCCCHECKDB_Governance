@@ -117,7 +117,11 @@ failure):
   simulated availability-group roles, awkward database names (`&`, `'`,
   `,`), the VLDB rotation (coverage, time limit, dropped tables), the
   tempdb free-space figure, and the job-overlap verdicts including runs that
-  cross midnight. Where a real 500 GB database or real `msdb` jobs would be
+  cross midnight. `05_NameList_Validation.sql` additionally verifies that the
+  database-list splitter handles quoted names and flags malformed input,
+  and that its callers reject malformed lists with error 50190 before work
+  begins. In particular `[master]suffix` and an unclosed `[master` are invalid;
+  `[master]   ` and `[Odd]]Name]` are valid. Where a real 500 GB database or real `msdb` jobs would be
   needed, the check builds a test copy of the installed procedure with a few
   counted text edits (scaled tier sizes, test tables) and runs that.
 
