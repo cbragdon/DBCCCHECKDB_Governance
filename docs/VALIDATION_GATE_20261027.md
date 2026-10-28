@@ -1,5 +1,8 @@
 # PR #7 validation gate — 2026-10-27
 
+**Historical pre-execution gate.** Successful local execution and the subsequent overlength-name correction are recorded in [VALIDATION_RESULTS_20261028.md](VALIDATION_RESULTS_20261028.md). The original planning state follows.
+
+
 **Status: NOT READY TO MERGE.** This document distinguishes live CI evidence, source-level checks and SQL Server execution. No test is recorded as successful unless it was actually executed.
 
 ## Scope
