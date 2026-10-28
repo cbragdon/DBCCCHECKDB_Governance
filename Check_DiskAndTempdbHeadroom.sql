@@ -100,6 +100,10 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
+    -- Validate the entire list before diagnostics can emit warnings or CommandLog rows.
+    IF EXISTS (SELECT 1 FROM dbo.DBCCGov_SplitDatabaseList(@TargetDatabases) WHERE IsMalformed = 1)
+        THROW 50190, 'Malformed bracketed database name: only whitespace may follow the closing bracket.', 1;
+
     DECLARE @EngineEdition INT = CAST(SERVERPROPERTY('EngineEdition') AS INT);
     DECLARE @IsManagedInstance BIT = CASE WHEN @EngineEdition = 8 THEN 1 ELSE 0 END;
     DECLARE @Msg NVARCHAR(1000);
@@ -312,8 +316,6 @@ BEGIN
 
     -- Split the list with dbo.DBCCGov_SplitDatabaseList (Split_DatabaseList.sql): items may be
     -- bracket-quoted ([name], ]] for ]), so any database name - including one with a comma - can be passed.
-    IF EXISTS (SELECT 1 FROM dbo.DBCCGov_SplitDatabaseList(@TargetDatabases) WHERE IsMalformed = 1)
-        THROW 50190, 'Malformed bracketed database name: only whitespace may follow the closing bracket.', 1;
     DECLARE @Targets TABLE (DatabaseName SYSNAME NOT NULL);
     INSERT INTO @Targets (DatabaseName)
     SELECT DatabaseName FROM dbo.DBCCGov_SplitDatabaseList(@TargetDatabases);
